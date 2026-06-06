@@ -1,0 +1,7 @@
+ticker,name,asset_class,shares,cost_per_share,sector,market,div_per_share
+2559,MAXISオルカン,index,150,15000,分散ETF,jp,180
+2558,MAXIS米国株S&P500,index,40,18000,分散ETF,jp,120
+SCHD,Schwab US Dividend,us_dividend,60,2600,分散ETF,us,110
+1489,NF日経高配当50,jp_dividend,30,55000,分散ETF,jp,2200
+1343,NF東証REIT,reit,40,1900,REIT,jp,75
+1597,MAXISJ-REIT,reit,50,1800,REIT,jp,70

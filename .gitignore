@@ -1,0 +1,16 @@
+# 実保有データ（コミット禁止。クラウドは st.secrets を使用）
+data/holdings.csv
+
+# Streamlit ローカルsecrets
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
