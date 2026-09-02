@@ -70,3 +70,72 @@ def test_parse_birth_date_returns_none_for_unset_or_broken():
     assert dataio.parse_birth_date('{"other_key": 1}') is None
     assert dataio.parse_birth_date('{"birth_date": "1980-13-99"}') is None
     assert dataio.parse_birth_date('{"birth_date": null}') is None
+
+
+# --- CSV シリアライズ（storage への保存用）---
+
+
+def test_serialize_holdings_csv_roundtrip():
+    # parse → serialize → parse で内容が保たれること
+    rows = dataio.parse_holdings_csv(FULL_CSV)
+    text = dataio.serialize_holdings_csv(rows)
+    again = dataio.parse_holdings_csv(text)
+    for before, after in zip(rows, again):
+        assert str(before["ticker"]) == str(after["ticker"])
+        assert float(before["shares"]) == float(after["shares"])
+        assert str(before["name"]) == str(after["name"])
+
+
+def test_serialize_holdings_csv_uses_canonical_column_order():
+    from dataio import HOLDINGS_COLUMNS
+
+    text = dataio.serialize_holdings_csv([{"ticker": "1605", "name": "INPEX"}])
+    assert text.split("\n")[0] == ",".join(HOLDINGS_COLUMNS)
+
+
+def test_serialize_holdings_csv_writes_empty_for_missing_and_nan():
+    # pandas が空欄を float('nan') で読むため、素直に str() すると "nan" が残る
+    # （実際に画面へ「nan 時点」と表示される事故が起きたため固定する）
+    rows = [{"ticker": "1605", "name": "INPEX", "purpose": float("nan"),
+             "price": None, "source": "nan"}]
+    text = dataio.serialize_holdings_csv(rows)
+    assert "nan" not in text
+    data_line = text.split("\n")[1]
+    assert data_line.startswith("1605,INPEX,")
+    assert data_line.endswith(",,,")  # 末尾の未設定列は空欄で埋まる
+
+
+def test_serialize_empty_rows_writes_header_only():
+    from dataio import HOLDINGS_COLUMNS
+
+    text = dataio.serialize_holdings_csv([])
+    assert text.strip() == ",".join(HOLDINGS_COLUMNS)
+
+
+def test_edit_roundtrip_preserves_changes_and_additions():
+    """画面編集の往復：値の変更・分類の設定・行追加が保存を経ても保たれること。
+
+    data_editor → serialize → storage → parse という実際の経路を模擬する。
+    """
+    import portfolio as pf
+
+    rows = dataio.parse_holdings_csv(FULL_CSV)
+    edited = [dict(r) for r in rows]
+    edited[0]["shares"] = 999
+    edited[0]["purpose"] = "yutai"
+    edited.append({
+        "ticker": "9999", "name": "追加銘柄", "asset_class": "jp_dividend",
+        "shares": 10, "cost_per_share": 1000, "sector": "個別株", "market": "jp",
+        "purpose": "dividend", "source": "手入力",
+    })
+
+    back = dataio.parse_holdings_csv(dataio.serialize_holdings_csv(edited))
+    assert len(back) == len(rows) + 1
+    assert float(back[0]["shares"]) == 999
+    assert back[0]["purpose"] == "yutai"
+    assert back[-1]["ticker"] == "9999"
+
+    # 保存後のデータがそのまま集計に使えること（分類が効く）
+    holdings = pf.build_holdings(back, {})
+    groups = pf.jp_dividend_by_purpose(holdings)
+    assert any(h.ticker == "9999" for h in groups["dividend"])

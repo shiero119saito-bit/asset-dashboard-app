@@ -17,6 +17,7 @@ import dividend as dv
 import portfolio as pf
 import prices as pr
 import simulation as sm
+import storage as sg
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 REAL_CSV = os.path.join(DATA_DIR, "holdings.csv")
@@ -104,25 +105,41 @@ def _secrets_holdings_csv() -> str | None:
         return None
 
 
-def load_rows(uploaded_text: str | None = None) -> tuple[list[dict], str]:
-    """保有データを多段ソースから読む。(rows, 使用ソースラベル) を返す。
+def storage_config() -> sg.StorageConfig | None:
+    """st.secrets[storage] から保存先設定を防御的に取得。未設定なら None。"""
+    try:
+        raw = dict(st.secrets["storage"])
+    except Exception:
+        return None
+    return sg.build_config(raw)
 
-    優先順：①アップロードCSV ②st.secrets[holdings][csv]（クラウド永続）
-            ③data/holdings.csv（ローカル実データ）④sample
+
+def load_rows(uploaded_text: str | None = None) -> tuple[list[dict], str, str | None]:
+    """保有データを多段ソースから読む。(rows, ソースラベル, storage の sha) を返す。
+
+    優先順：①アップロードCSV ②private repo（画面編集の保存先）
+            ③st.secrets[holdings][csv] ④data/holdings.csv ⑤sample
+
+    storage を secrets より優先するのは、画面で編集した最新が常に勝つようにするため。
+    sha は保存時の競合検知に使う（storage 以外から読んだ場合は None）。
     """
     if uploaded_text is not None and uploaded_text.strip() != "":
-        return dataio.parse_holdings_csv(uploaded_text), "アップロードCSV"
+        return dataio.parse_holdings_csv(uploaded_text), "アップロードCSV", None
+
+    stored_text, sha = sg.load(storage_config())
+    if stored_text:
+        return dataio.parse_holdings_csv(stored_text), "保存先（自動同期）", sha
 
     secret_csv = _secrets_holdings_csv()
     if secret_csv:
-        return dataio.parse_holdings_csv(secret_csv), "secrets（クラウド）"
+        return dataio.parse_holdings_csv(secret_csv), "secrets（クラウド）", None
 
     if os.path.exists(REAL_CSV):
         df = pd.read_csv(REAL_CSV)
-        return df.to_dict("records"), "holdings.csv"
+        return df.to_dict("records"), "holdings.csv", None
 
     df = pd.read_csv(SAMPLE_CSV)
-    return df.to_dict("records"), "holdings.sample.csv（サンプル）"
+    return df.to_dict("records"), "holdings.sample.csv（サンプル）", None
 
 
 def yen(v: float) -> str:
@@ -149,6 +166,99 @@ def _render_simple_allocation(
         {axis: labels, "現在%": [round(v, 1) for v in alloc.values()]}
     ).sort_values("現在%", ascending=False)
     right.dataframe(table_df, width="stretch", hide_index=True)
+
+
+def _merge_uploaded(
+    existing: list[dict], uploaded_text: str, src: str
+) -> tuple[list[dict], str]:
+    """アップロードCSVを既存データへマージする（分類を保つ）。
+
+    CLI の import_holdings.py と同じ merge_holdings を使い、既存の
+    purpose/asset_class を残したまま株数・取得単価・名称だけ更新する。
+    source は行ごとの値を尊重し、(ticker, source) 単位でマージする
+    ＝同一銘柄を複数の証券会社で持っていても片方が消えない。
+    """
+    uploaded_rows = dataio.parse_holdings_csv(uploaded_text)
+    by_source: dict[str, list[dict]] = {}
+    for row in uploaded_rows:
+        by_source.setdefault(str(row.get("source", "") or "").strip(), []).append(row)
+
+    merged = existing
+    for source, group in by_source.items():
+        merged = dataio.merge_holdings(merged, group, source=source)
+    return merged, f"{src} ＋ アップロード（マージ）"
+
+
+def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
+    """保有データを画面で直接編集し、保存先へ書き戻す。
+
+    普段の買い増し・分類の修正はここで完結させる（CSV取込は初期と一括更新のみ）。
+    保存先が未設定の環境ではCSVダウンロードに切り替え、編集自体は行えるようにする。
+    """
+    st.subheader("保有データの編集")
+    st.caption(
+        "株数・取得単価の修正、銘柄の追加・削除ができる。"
+        "行を増やすには表の最下部に入力する。"
+    )
+
+    editable = pd.DataFrame(
+        [{col: dataio._cell(row.get(col)) for col in dataio.HOLDINGS_COLUMNS} for row in rows]
+    )
+    # 数値列は数値として編集させる（文字列のままだと計算に使えない値が入りうる）
+    for col in ("shares", "cost_per_share", "div_per_share", "price"):
+        editable[col] = pd.to_numeric(editable[col], errors="coerce")
+
+    edited = st.data_editor(
+        editable,
+        width="stretch",
+        hide_index=True,
+        num_rows="dynamic",
+        key="holdings_editor",
+        column_config={
+            "ticker": st.column_config.TextColumn("銘柄コード", required=True),
+            "name": st.column_config.TextColumn("名称", required=True),
+            "asset_class": st.column_config.SelectboxColumn(
+                "資産クラス", options=list(pf.ASSET_CLASSES), required=True
+            ),
+            "shares": st.column_config.NumberColumn("株数", min_value=0.0, format="%.4f"),
+            "cost_per_share": st.column_config.NumberColumn("取得単価", min_value=0.0, format="%.2f"),
+            "sector": st.column_config.TextColumn("商品種別"),
+            "market": st.column_config.SelectboxColumn("上場市場", options=["jp", "us"]),
+            "div_per_share": st.column_config.NumberColumn("1株配当", min_value=0.0),
+            "purpose": st.column_config.SelectboxColumn(
+                "用途", options=["", "dividend", "yutai"],
+                help="dividend=高配当目的 / yutai=優待目的（日本個別株のみ集計に使う）",
+            ),
+            "source": st.column_config.TextColumn("証券会社"),
+            "price": st.column_config.NumberColumn("保存時価", min_value=0.0, format="%.2f"),
+            "price_asof": st.column_config.TextColumn("時価の日付"),
+        },
+    )
+
+    edited_rows = edited.to_dict("records")
+    csv_text = dataio.serialize_holdings_csv(edited_rows)
+
+    left, right = st.columns([1, 2])
+    if cfg is None:
+        left.download_button(
+            "編集内容をCSVで保存", data=csv_text.encode("utf-8"),
+            file_name="holdings.csv", mime="text/csv",
+        )
+        right.caption(
+            "保存先が未設定のため、編集結果はダウンロードして手元のCSVを置き換えること。"
+            "自動保存の設定手順は docs/04_deploy.md を参照。"
+        )
+        return
+
+    if left.button("保存", type="primary", key="save_holdings"):
+        ok, message = sg.save(cfg, csv_text, sha, f"update holdings ({date.today().isoformat()})")
+        if ok:
+            st.cache_data.clear()  # 銘柄構成が変わるため取得済みの時価等を捨てる
+            st.success(message)
+            st.rerun()
+        else:
+            st.error(message)
+    right.caption(f"保存先：{cfg.owner}/{cfg.repo}/{cfg.path}")
 
 
 def _render_birth_date_input() -> date | None:
@@ -411,12 +521,22 @@ def main() -> None:
     st.set_page_config(page_title="資産ダッシュボード", layout="wide")
     st.title("保有資産 見える化ダッシュボード")
 
+    cfg = storage_config()
+
     st.sidebar.subheader("データ")
     uploaded = st.sidebar.file_uploader("保有CSVをアップロード（任意）", type="csv")
     uploaded_text = uploaded.getvalue().decode("utf-8-sig") if uploaded is not None else None
+    merge_mode = "マージ"
+    if uploaded_text:
+        merge_mode = st.sidebar.radio(
+            "取込方法", ["マージ", "置換"], horizontal=True, key="import_mode",
+            help="マージ＝既存の分類（用途・資産クラス）を保ち、株数と取得単価だけ更新する",
+        )
 
     try:
-        rows, src = load_rows(uploaded_text)
+        rows, src, sha = load_rows(None if merge_mode == "マージ" else uploaded_text)
+        if uploaded_text and merge_mode == "マージ":
+            rows, src = _merge_uploaded(rows, uploaded_text, src)
     except ValueError as e:
         st.error(f"CSVの読み込みに失敗しました：{e}")
         st.stop()
@@ -424,6 +544,11 @@ def main() -> None:
     st.sidebar.caption(f"データソース：{src}")
     if "サンプル" in src:
         st.warning("サンプルデータを表示中です。実データはCSVアップロード、または data/holdings.csv で表示されます。")
+    if uploaded_text:
+        st.info(
+            f"アップロードしたCSVを反映中（{merge_mode}）。"
+            + ("下の「保有データの編集」で保存すると確定する。" if cfg else "確定するには編集欄からCSVを保存すること。")
+        )
 
     tickers = [str(r["ticker"]).strip() for r in rows]
     us_tickers = {str(r["ticker"]).strip() for r in rows if str(r.get("market", "")).strip() == "us"}
@@ -612,6 +737,9 @@ def main() -> None:
                 ]
             )
             st.dataframe(purpose_df, width="stretch", hide_index=True)
+
+    # --- 保有データの編集（普段の更新はここで完結させる） ---
+    _render_holdings_editor(rows, sha, cfg)
 
     # --- シミュレーション ---
     st.subheader("シミュレーション")

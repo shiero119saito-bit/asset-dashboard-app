@@ -64,7 +64,20 @@ class _Stub:
     def file_uploader(self, label, **kw):
         return None
 
+    def data_editor(self, data, **kw):
+        return data  # 編集なしでそのまま返す
+
+    def download_button(self, label, **kw):
+        return False
+
     # 出力系：何もしない
+    def __getattr__(self, name):
+        return lambda *a, **kw: None
+
+
+class _ColumnConfig:
+    """st.column_config.* のスタブ（設定オブジェクトは使われないので None でよい）。"""
+
     def __getattr__(self, name):
         return lambda *a, **kw: None
 
@@ -81,6 +94,7 @@ class _StreamlitStub(_Stub):
         super().__init__()
         self.sidebar = _Stub()
         self.secrets = _Secrets()
+        self.column_config = _ColumnConfig()
         self._use_live = use_live
 
     def set_page_config(self, **kw):
