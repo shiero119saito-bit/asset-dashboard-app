@@ -1,7 +1,7 @@
-ticker,name,asset_class,shares,cost_per_share,sector,market,div_per_share,purpose,source
-2559,MAXISオルカン,index,150,15000,分散ETF,jp,180,,
-2558,MAXIS米国株S&P500,index,40,18000,分散ETF,jp,120,,
-SCHD,Schwab US Dividend,us_dividend,60,2600,分散ETF,us,110,,
-1489,NF日経高配当50,jp_dividend,30,55000,分散ETF,jp,2200,dividend,
-1343,NF東証REIT,reit,40,1900,REIT,jp,75,,
-1597,MAXISJ-REIT,reit,50,1800,REIT,jp,70,,
+ticker,name,asset_class,shares,cost_per_share,sector,market,div_per_share,purpose,source,price,price_asof
+2559,MAXISオルカン,index,150,15000,分散ETF,jp,180,,,16200,2026-09-03
+2558,MAXIS米国株S&P500,index,40,18000,分散ETF,jp,120,,,19500,2026-09-03
+SCHD,Schwab US Dividend,us_dividend,60,2600,分散ETF,us,110,,,2800,2026-09-03
+1489,NF日経高配当50,jp_dividend,30,55000,分散ETF,jp,2200,dividend,,60000,2026-09-03
+1343,NF東証REIT,reit,40,1900,REIT,jp,75,,,2000,2026-09-03
+1597,MAXISJ-REIT,reit,50,1800,REIT,jp,70,,,1850,2026-09-03

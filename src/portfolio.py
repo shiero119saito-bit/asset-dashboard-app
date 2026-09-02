@@ -45,6 +45,7 @@ class Holding:
     market: str = "us"
     purpose: str = ""
     source: str = ""
+    price_asof: str = ""  # CSV保存の時価がいつ時点か（ライブ取得時は空）
 
     @property
     def cost_value(self) -> float:
@@ -86,7 +87,7 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
             )
         shares = float(row["shares"])
         cost_per_share = float(row["cost_per_share"])
-        price = float(price_map.get(ticker, cost_per_share))
+        price = _resolve_price(ticker, row, price_map, cost_per_share)
         holdings.append(
             Holding(
                 ticker=ticker,
@@ -99,9 +100,34 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
                 market=_resolve_market(row.get("market"), ticker),
                 purpose=_clean_str(row.get("purpose"), ""),
                 source=_clean_str(row.get("source"), ""),
+                # ライブ取得できた銘柄は「現在値」なので asof は付けない
+                price_asof="" if price_map.get(ticker) else _clean_str(row.get("price_asof"), ""),
             )
         )
     return holdings
+
+
+def _resolve_price(
+    ticker: str, row: dict, price_map: dict[str, float], cost_per_share: float
+) -> float:
+    """現在値を3段で解決する：ライブ時価 → CSVに保存された時価 → 取得単価。
+
+    CSVの `price` 列は取込時（ローカル）に保存した時価。Streamlit Cloud からは
+    Yahoo Finance が HTTP 401 を返しライブ取得ができないため、そこでの表示は
+    この保存値に頼る。いつ時点かは `price_asof` 列に持ち、UI が明示する。
+    """
+    live = price_map.get(ticker)
+    if live:
+        return float(live)
+    saved = _clean_str(row.get("price"), "")
+    if saved:
+        try:
+            value = float(saved)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return cost_per_share
 
 
 def _clean_str(value, default: str) -> str:

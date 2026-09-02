@@ -436,12 +436,19 @@ def main() -> None:
     if use_live:
         price_map = pr.convert_us_values_to_jpy(price_map, us_tickers, fx_rate)
     if use_live and not price_map:
-        # 全銘柄で取れないのは通信不可のほかに API 仕様変更もありうる
-        # （2026-09-02：yfinance のキーが camelCase 化して全滅した実例）
-        st.warning(
-            "時価を全銘柄で取得できませんでした（オフライン・yfinance未導入・API仕様変更のいずれか）。"
-            "取得単価で評価するため含み損益は0と表示されます。"
-        )
+        # 全銘柄で取れないのは通信不可のほかに API 仕様変更やIP制限もありうる
+        # （2026-09-02：yfinance のキーが camelCase 化して全滅／クラウドは Yahoo が 401）
+        saved = {str(r.get("price_asof", "")).strip() for r in rows if str(r.get("price", "")).strip()}
+        saved.discard("")
+        if saved:
+            st.info(
+                f"ライブ時価を取得できないため、取込時に保存した時価で評価します（{max(saved)} 時点）。"
+            )
+        else:
+            st.warning(
+                "時価を取得できず、保存された時価もありません（取得単価で評価するため含み損益は0）。"
+                "ローカルで `python scripts/import_holdings.py --refresh-prices` を実行すると保存されます。"
+            )
 
     holdings = pf.build_holdings(rows, price_map)
 

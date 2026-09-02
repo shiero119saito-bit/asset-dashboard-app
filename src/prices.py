@@ -23,6 +23,21 @@ def to_yf_symbol(ticker: str) -> str:
     return t
 
 
+# yfinance に問い合わせられる ticker の形（英数字・ドット・ハイフンのみ）。
+# 日本の投資信託は証券コードを持たず銘柄名がそのまま ticker になるため該当しない。
+_FETCHABLE_TICKER = re.compile(r"^[A-Za-z0-9.\-]+$")
+
+
+def is_fetchable(ticker: str) -> bool:
+    """yfinance に問い合わせる価値のある ticker か。
+
+    投資信託（例「ｅＭＡＸＩＳ Ｓｌｉｍ 全世界株式」）は上場しておらず yfinance に
+    存在しない。問い合わせても必ず "possibly delisted" で失敗するうえ、銘柄数分の
+    無駄なリクエストがレート制限を悪化させるため、呼ぶ前に弾く。
+    """
+    return bool(_FETCHABLE_TICKER.match(ticker.strip()))
+
+
 def _to_camel(snake: str) -> str:
     head, *rest = snake.split("_")
     return head + "".join(w.capitalize() for w in rest)
@@ -64,6 +79,8 @@ def fetch_prices(tickers: list[str]) -> dict[str, float]:
 
     result: dict[str, float] = {}
     for ticker in tickers:
+        if not is_fetchable(ticker):
+            continue  # 投資信託等：yfinance に存在せず必ず失敗する
         symbol = to_yf_symbol(ticker)
         try:
             price = fast_info_value(yf.Ticker(symbol).fast_info, "last_price")
@@ -183,6 +200,8 @@ def fetch_dividends(tickers: list[str]) -> dict[str, float]:
     result: dict[str, float] = {}
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365)
     for ticker in tickers:
+        if not is_fetchable(ticker):
+            continue  # 投資信託等：yfinance に存在せず必ず失敗する
         symbol = to_yf_symbol(ticker)
         try:
             tk = yf.Ticker(symbol)
@@ -217,6 +236,8 @@ def fetch_dividend_months(tickers: list[str]) -> dict[str, list[int]]:
     result: dict[str, list[int]] = {}
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=730)
     for ticker in tickers:
+        if not is_fetchable(ticker):
+            continue  # 投資信託等：yfinance に存在せず必ず失敗する
         symbol = to_yf_symbol(ticker)
         try:
             divs = yf.Ticker(symbol).dividends
@@ -246,6 +267,8 @@ def fetch_price_history(tickers: list[str], years: int) -> dict[str, list[tuple[
 
     result: dict[str, list[tuple[date, float]]] = {}
     for ticker in tickers:
+        if not is_fetchable(ticker):
+            continue  # 投資信託等：yfinance に存在せず必ず失敗する
         symbol = to_yf_symbol(ticker)
         try:
             hist = yf.Ticker(symbol).history(period=f"{years}y", interval="1mo")

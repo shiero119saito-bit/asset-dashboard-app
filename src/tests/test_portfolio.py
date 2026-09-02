@@ -80,6 +80,37 @@ def test_empty_portfolio_is_safe():
     assert pf.allocation_by_class(empty) == {ac: 0.0 for ac in pf.ASSET_CLASSES}
 
 
+def test_price_falls_back_to_saved_price_when_live_missing():
+    # クラウドは Yahoo が401でライブ取得できない → CSVに保存した時価を使う
+    rows = [{"ticker": "X", "name": "x", "asset_class": "index", "shares": 10,
+             "cost_per_share": 100, "price": "150", "price_asof": "2026-09-03"}]
+    h = pf.build_holdings(rows, {})[0]
+    assert h.price == 150.0
+    assert h.market_value == 1500.0
+    assert h.price_asof == "2026-09-03"  # いつ時点かをUIが出せる
+
+
+def test_live_price_wins_over_saved_price():
+    rows = [{"ticker": "X", "name": "x", "asset_class": "index", "shares": 10,
+             "cost_per_share": 100, "price": "150", "price_asof": "2026-09-03"}]
+    h = pf.build_holdings(rows, {"X": 200.0})[0]
+    assert h.price == 200.0
+    assert h.price_asof == ""  # ライブ値は「現在値」なので日付を出さない
+
+
+def test_saved_price_invalid_or_zero_falls_back_to_cost():
+    for bad in ("", "0", "nan", "abc", "-5"):
+        rows = [{"ticker": "X", "name": "x", "asset_class": "index", "shares": 10,
+                 "cost_per_share": 100, "price": bad}]
+        assert pf.build_holdings(rows, {})[0].price == 100.0, f"price={bad!r}"
+
+
+def test_price_column_absent_is_safe():
+    # price 列を持たない旧形式のCSVでも従来どおり取得単価にフォールバックする
+    rows = [{"ticker": "X", "name": "x", "asset_class": "index", "shares": 10, "cost_per_share": 100}]
+    assert pf.build_holdings(rows, {})[0].price == 100.0
+
+
 def test_allocation_by_sector_percentages():
     rows = [
         {"ticker": "A", "name": "a", "asset_class": "index", "shares": 10,

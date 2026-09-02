@@ -63,6 +63,17 @@ def test_fast_info_value_returns_none_when_missing_or_zero():
     assert pr.fast_info_value(object(), "last_price") is None
 
 
+def test_is_fetchable_rejects_mutual_fund_names():
+    # 投資信託は証券コードがなく銘柄名が ticker になる＝yfinance に存在しない
+    assert pr.is_fetchable("2559") is True
+    assert pr.is_fetchable("SCHD") is True
+    assert pr.is_fetchable("BRK-B") is True
+    assert pr.is_fetchable("JPY=X") is False  # 為替は専用関数で扱う
+    assert pr.is_fetchable("eMAXIS Slim 全世界株式") is False
+    assert pr.is_fetchable("ｅＭＡＸＩＳ　Ｓｌｉｍ") is False
+    assert pr.is_fetchable("") is False
+
+
 def test_to_camel_conversion():
     assert pr._to_camel("last_price") == "lastPrice"
     assert pr._to_camel("year_high") == "yearHigh"
