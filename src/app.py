@@ -438,16 +438,24 @@ def main() -> None:
     if use_live and not price_map:
         # 全銘柄で取れないのは通信不可のほかに API 仕様変更やIP制限もありうる
         # （2026-09-02：yfinance のキーが camelCase 化して全滅／クラウドは Yahoo が 401）
-        saved = {str(r.get("price_asof", "")).strip() for r in rows if str(r.get("price", "")).strip()}
-        saved.discard("")
-        if saved:
+        saved_count = sum(1 for h in holdings if h.price_asof)
+        asof_dates = sorted({h.price_asof for h in holdings if h.price_asof})
+        if saved_count:
             st.info(
-                f"ライブ時価を取得できないため、取込時に保存した時価で評価します（{max(saved)} 時点）。"
+                f"ライブ時価を取得できないため、取込時に保存した時価で評価します"
+                f"（{asof_dates[-1]} 時点・{saved_count}/{len(holdings)}銘柄）。"
             )
         else:
+            has_price_column = any("price" in r for r in rows)
             st.warning(
                 "時価を取得できず、保存された時価もありません（取得単価で評価するため含み損益は0）。"
-                "ローカルで `python scripts/import_holdings.py --refresh-prices` を実行すると保存されます。"
+                + (
+                    "データに price 列はあるが有効な値が入っていない。"
+                    if has_price_column
+                    else "データに price 列がない＝取込データが古い。"
+                )
+                + " ローカルで `python scripts/import_holdings.py --refresh-prices` を実行し、"
+                "生成された holdings.csv でデータを更新すること。"
             )
 
     holdings = pf.build_holdings(rows, price_map)
@@ -567,6 +575,7 @@ def main() -> None:
                 "株数": h.shares,
                 "取得単価": h.cost_per_share,
                 "現在値": round(h.price, 2),
+                "時価": h.price_asof or ("ライブ" if price_map.get(h.ticker) else "取得単価"),
                 "評価額": round(h.market_value),
                 "含み損益": round(h.gain),
                 "損益率%": round(h.gain_rate, 2),
