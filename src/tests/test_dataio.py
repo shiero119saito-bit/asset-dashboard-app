@@ -1,6 +1,7 @@
 """dataio.py の純関数テスト（I/O なし）。"""
 import os
 import sys
+from datetime import date
 
 import pytest
 
@@ -50,3 +51,22 @@ def test_empty_input_returns_empty():
     assert dataio.parse_holdings_csv("") == []
     assert dataio.parse_holdings_csv("   ") == []
     assert dataio.parse_holdings_csv(None) == []
+
+
+# --- 個人設定（生年月日）---
+
+
+def test_birth_date_roundtrip():
+    birth = date(1980, 6, 15)
+    assert dataio.parse_birth_date(dataio.serialize_birth_date(birth)) == birth
+
+
+def test_parse_birth_date_returns_none_for_unset_or_broken():
+    # 未設定・空・壊れたJSON・キー欠損・不正な日付は例外でなく None（＝未設定扱い）
+    assert dataio.parse_birth_date(None) is None
+    assert dataio.parse_birth_date("") is None
+    assert dataio.parse_birth_date("   ") is None
+    assert dataio.parse_birth_date("{壊れている") is None
+    assert dataio.parse_birth_date('{"other_key": 1}') is None
+    assert dataio.parse_birth_date('{"birth_date": "1980-13-99"}') is None
+    assert dataio.parse_birth_date('{"birth_date": null}') is None

@@ -18,7 +18,7 @@ ASSET_CLASS_LABELS = {
     "reit": "REIT",
 }
 
-# 目標アセットアロケーション（%）— personal_asset_strategy より
+# 目標アセットアロケーション（%）。運用方針に合わせて変更する。
 TARGET_ALLOCATION = {
     "index": 60.0,
     "us_dividend": 20.0,
@@ -43,6 +43,8 @@ class Holding:
     price: float
     sector: str = "その他"
     market: str = "us"
+    purpose: str = ""
+    source: str = ""
 
     @property
     def cost_value(self) -> float:
@@ -95,6 +97,8 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
                 price=price,
                 sector=_clean_str(row.get("sector"), "その他"),
                 market=_resolve_market(row.get("market"), ticker),
+                purpose=_clean_str(row.get("purpose"), ""),
+                source=_clean_str(row.get("source"), ""),
             )
         )
     return holdings
@@ -156,3 +160,50 @@ def allocation_drift(holdings: list[Holding]) -> dict[str, float]:
     """目標AAとのズレ（現在% − 目標%）。正=オーバーウェイト、負=アンダーウェイト。"""
     current = allocation_by_class(holdings)
     return {ac: current[ac] - TARGET_ALLOCATION[ac] for ac in ASSET_CLASSES}
+
+
+def _allocation_by_key(holdings: list[Holding], key_fn) -> dict[str, float]:
+    """key_fn の値別に評価額構成比（%）を集計する。保有0なら空dict。
+
+    allocation_by_class と違いキーが動的（CSV由来の値次第）なため、
+    全キーを0で埋めることはしない。
+    """
+    market = total_market(holdings)
+    if market == 0:
+        return {}
+    sums: dict[str, float] = {}
+    for h in holdings:
+        key = key_fn(h)
+        sums[key] = sums.get(key, 0.0) + h.market_value
+    return {k: v / market * 100.0 for k, v in sums.items()}
+
+
+def allocation_by_sector(holdings: list[Holding]) -> dict[str, float]:
+    """sector 列別の評価額構成比（%）。
+
+    注意：実データの sector は業種（電気機器・銀行 等）ではなく
+    商品種別（個別株/投資信託/ETF/REIT）。業種分散の可視化には別途データ取得が要る。
+    """
+    return _allocation_by_key(holdings, lambda h: h.sector)
+
+
+def allocation_by_market_region(holdings: list[Holding]) -> dict[str, float]:
+    """market 列別の評価額構成比（%）。
+
+    注意：market は上場市場（jp/us）であり投資対象地域ではない。
+    東証上場のオルカン・S&P500 ETF/投信は jp に計上される。
+    """
+    return _allocation_by_key(holdings, lambda h: h.market)
+
+
+def jp_dividend_by_purpose(holdings: list[Holding]) -> dict[str, list[Holding]]:
+    """日本高配当(jp_dividend)保有を purpose（dividend/yutai/未分類）で分類する。
+
+    AA計算（allocation_by_class 等）には影響しない＝表示上のグルーピングのみ。
+    """
+    groups: dict[str, list[Holding]] = {"dividend": [], "yutai": [], "": []}
+    for h in holdings:
+        if h.asset_class != "jp_dividend":
+            continue
+        groups.setdefault(h.purpose, []).append(h)
+    return groups

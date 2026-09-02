@@ -1,6 +1,9 @@
 # 実保有データ（コミット禁止。クラウドは st.secrets を使用）
 data/holdings.csv
 
+# 個人設定（生年月日＝機微情報。クラウドでは揮発するがコミットは禁止）
+data/user_settings.json
+
 # Streamlit ローカルsecrets
 .streamlit/secrets.toml
 

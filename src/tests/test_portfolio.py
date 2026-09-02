@@ -78,3 +78,52 @@ def test_empty_portfolio_is_safe():
     assert pf.total_market(empty) == 0
     assert pf.total_gain_rate(empty) == 0.0
     assert pf.allocation_by_class(empty) == {ac: 0.0 for ac in pf.ASSET_CLASSES}
+
+
+def test_allocation_by_sector_percentages():
+    rows = [
+        {"ticker": "A", "name": "a", "asset_class": "index", "shares": 10,
+         "cost_per_share": 100, "sector": "分散ETF"},
+        {"ticker": "B", "name": "b", "asset_class": "reit", "shares": 10,
+         "cost_per_share": 100, "sector": "REIT"},
+    ]
+    holdings = pf.build_holdings(rows, {"A": 100, "B": 300})  # 評価額 1000 / 3000
+    alloc = pf.allocation_by_sector(holdings)
+    assert alloc == pytest.approx({"分散ETF": 25.0, "REIT": 75.0})
+
+
+def test_allocation_by_market_region_percentages():
+    rows = [
+        {"ticker": "1001", "name": "jp", "asset_class": "jp_dividend", "shares": 10,
+         "cost_per_share": 100, "market": "jp"},
+        {"ticker": "SCHD", "name": "us", "asset_class": "us_dividend", "shares": 10,
+         "cost_per_share": 100, "market": "us"},
+    ]
+    holdings = pf.build_holdings(rows, {"1001": 100, "SCHD": 100})  # 評価額 均等
+    alloc = pf.allocation_by_market_region(holdings)
+    assert alloc == pytest.approx({"jp": 50.0, "us": 50.0})
+
+
+def test_allocation_by_sector_empty_portfolio_is_safe():
+    assert pf.allocation_by_sector([]) == {}
+    assert pf.allocation_by_market_region([]) == {}
+
+
+def test_jp_dividend_by_purpose_groups_and_ignores_other_classes():
+    rows = [
+        {"ticker": "1001", "name": "配当株", "asset_class": "jp_dividend", "shares": 10,
+         "cost_per_share": 100, "purpose": "dividend"},
+        {"ticker": "1002", "name": "優待株", "asset_class": "jp_dividend", "shares": 5,
+         "cost_per_share": 200, "purpose": "yutai"},
+        {"ticker": "1003", "name": "未分類株", "asset_class": "jp_dividend", "shares": 1,
+         "cost_per_share": 300},
+        {"ticker": "2559", "name": "オルカン", "asset_class": "index", "shares": 100,
+         "cost_per_share": 200, "purpose": "dividend"},
+    ]
+    holdings = pf.build_holdings(rows, {})
+    groups = pf.jp_dividend_by_purpose(holdings)
+    assert [h.ticker for h in groups["dividend"]] == ["1001"]
+    assert [h.ticker for h in groups["yutai"]] == ["1002"]
+    assert [h.ticker for h in groups[""]] == ["1003"]
+    # index クラスは jp_dividend でないため除外される
+    assert all(h.ticker != "2559" for group in groups.values() for h in group)
