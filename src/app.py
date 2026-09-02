@@ -435,11 +435,14 @@ def main() -> None:
     price_map = cached_prices(tuple(tickers)) if use_live else {}
     if use_live:
         price_map = pr.convert_us_values_to_jpy(price_map, us_tickers, fx_rate)
+    holdings = pf.build_holdings(rows, price_map)
+
     if use_live and not price_map:
         # 全銘柄で取れないのは通信不可のほかに API 仕様変更やIP制限もありうる
         # （2026-09-02：yfinance のキーが camelCase 化して全滅／クラウドは Yahoo が 401）
-        saved_count = sum(1 for h in holdings if h.price_asof)
+        # 保存時価が効いたかは Holding から見る（rows の生値には pandas の "nan" が混ざる）
         asof_dates = sorted({h.price_asof for h in holdings if h.price_asof})
+        saved_count = sum(1 for h in holdings if h.price_asof)
         if saved_count:
             st.info(
                 f"ライブ時価を取得できないため、取込時に保存した時価で評価します"
@@ -457,8 +460,6 @@ def main() -> None:
                 + " ローカルで `python scripts/import_holdings.py --refresh-prices` を実行し、"
                 "生成された holdings.csv でデータを更新すること。"
             )
-
-    holdings = pf.build_holdings(rows, price_map)
 
     # 配当データ：CSV div_per_share を優先、空は yfinance で補完
     div_map = {str(r["ticker"]).strip(): float(r["div_per_share"])
