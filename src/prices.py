@@ -23,6 +23,35 @@ def to_yf_symbol(ticker: str) -> str:
     return t
 
 
+def _to_camel(snake: str) -> str:
+    head, *rest = snake.split("_")
+    return head + "".join(w.capitalize() for w in rest)
+
+
+def fast_info_value(info, name: str) -> float | None:
+    """FastInfo から値を取り出す（snake_case 名で指定）。取れなければ None。
+
+    yfinance 1.7.0 で FastInfo の**辞書キーが snake_case から camelCase へ変わった**
+    （`lastPrice` / `yearHigh`）。一方で属性アクセスは snake_case のまま使える。
+    このため `.get("last_price")` は例外も出さず None を返し、時価・為替の取得が
+    全銘柄で静かに失敗していた（2026-09-02 に発覚）。
+
+    どちらの表記でも動くよう、属性→camelキー→snakeキーの順に試す。
+    """
+    for get in (
+        lambda: getattr(info, name),
+        lambda: info.get(_to_camel(name)),
+        lambda: info.get(name),
+    ):
+        try:
+            value = get()
+        except Exception:
+            continue
+        if value:
+            return float(value)
+    return None
+
+
 def fetch_prices(tickers: list[str]) -> dict[str, float]:
     """ticker リストの現在値を {ticker: price} で返す。失敗銘柄はキー省略。
 
@@ -37,10 +66,9 @@ def fetch_prices(tickers: list[str]) -> dict[str, float]:
     for ticker in tickers:
         symbol = to_yf_symbol(ticker)
         try:
-            info = yf.Ticker(symbol).fast_info
-            price = info.get("last_price") if hasattr(info, "get") else info["last_price"]
+            price = fast_info_value(yf.Ticker(symbol).fast_info, "last_price")
             if price:
-                result[ticker] = float(price)
+                result[ticker] = price
         except Exception:
             # 個別銘柄の失敗は無視（呼び出し側が取得単価でフォールバック）
             continue
@@ -61,9 +89,7 @@ def fetch_fx_rate() -> float | None:
     except ImportError:
         return None
     try:
-        info = yf.Ticker(FX_SYMBOL).fast_info
-        rate = info.get("last_price") if hasattr(info, "get") else info["last_price"]
-        return float(rate) if rate else None
+        return fast_info_value(yf.Ticker(FX_SYMBOL).fast_info, "last_price")
     except Exception:
         return None
 
@@ -102,10 +128,9 @@ def fetch_price_and_high(ticker: str) -> tuple[float, float]:
         return (0.0, 0.0)
     try:
         info = yf.Ticker(to_yf_symbol(ticker)).fast_info
-        get = info.get if hasattr(info, "get") else (lambda k, d=None: info[k])
-        price = get("last_price", 0.0) or 0.0
-        high = get("year_high", 0.0) or 0.0
-        return (float(price), float(high))
+        price = fast_info_value(info, "last_price") or 0.0
+        high = fast_info_value(info, "year_high") or 0.0
+        return (price, high)
     except Exception:
         return (0.0, 0.0)
 

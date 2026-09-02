@@ -436,7 +436,12 @@ def main() -> None:
     if use_live:
         price_map = pr.convert_us_values_to_jpy(price_map, us_tickers, fx_rate)
     if use_live and not price_map:
-        st.info("時価を取得できませんでした（オフライン/未導入）。取得単価で評価します。")
+        # 全銘柄で取れないのは通信不可のほかに API 仕様変更もありうる
+        # （2026-09-02：yfinance のキーが camelCase 化して全滅した実例）
+        st.warning(
+            "時価を全銘柄で取得できませんでした（オフライン・yfinance未導入・API仕様変更のいずれか）。"
+            "取得単価で評価するため含み損益は0と表示されます。"
+        )
 
     holdings = pf.build_holdings(rows, price_map)
 
