@@ -139,3 +139,29 @@ def test_edit_roundtrip_preserves_changes_and_additions():
     holdings = pf.build_holdings(back, {})
     groups = pf.jp_dividend_by_purpose(holdings)
     assert any(h.ticker == "9999" for h in groups["dividend"])
+
+
+def test_serialize_writes_whole_numbers_without_decimal_point():
+    """整数値の float は整数として書く（69991.0 → 69991）。
+
+    pandas が数値列を float で読むため、素直に str() すると株数や時価に不要な .0 が
+    付く。小数を持つ値（投信の1口あたり取得単価）はそのまま残す必要がある。
+    """
+    text = dataio.serialize_holdings_csv([
+        {"ticker": "1343", "shares": 40.0, "cost_per_share": 1800.0, "price": 1931.0},
+        {"ticker": "オルカン", "shares": 366448.0, "cost_per_share": 2.469655, "price": 3.7945},
+    ])
+    lines = text.strip().split("\n")
+    assert ",40,1800," in lines[1] and ",1931," in lines[1]
+    assert ",366448,2.469655," in lines[2] and ",3.7945," in lines[2]
+
+
+def test_holdings_columns_include_fund_codes():
+    # 投信の基準価額取得には ISIN と協会コードの両方が要る
+    assert dataio.HOLDINGS_COLUMNS[-2:] == ("isin", "assoc_fund_cd")
+
+
+def test_rows_without_fund_columns_still_serialize():
+    # 既存データ（isin 列を持たない）が後方互換で通ること
+    text = dataio.serialize_holdings_csv([{"ticker": "1343", "shares": 40}])
+    assert text.strip().split("\n")[1].endswith(",,")

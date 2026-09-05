@@ -32,6 +32,10 @@ HOLDINGS_COLUMNS = (
     "source",
     "price",
     "price_asof",
+    # 投資信託の基準価額取得用（投資信託協会のCSVはこの2つでファンドが特定される）。
+    # 上場銘柄では空欄。yfinance に存在しない投信を時価評価するために必要
+    "isin",
+    "assoc_fund_cd",
 )
 
 
@@ -67,11 +71,19 @@ def serialize_holdings_csv(rows: list[dict], columns: tuple[str, ...] | None = N
 
 
 def _cell(value) -> str:
-    """CSVセル1つ分の文字列化。None・NaN・"nan" は空文字に落とす。"""
+    """CSVセル1つ分の文字列化。None・NaN・"nan" は空文字に落とす。
+
+    整数値の float は整数として書く（`69991.0` → `69991`）。pandas が数値列を float で
+    読むため、素直に str() すると株数や時価に不要な `.0` が付いて読みにくくなる。
+    小数を持つ値（取得単価 `1.228729` 等）はそのまま残す。
+    """
     if value is None:
         return ""
-    if isinstance(value, float) and value != value:  # NaN
-        return ""
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return ""
+        if value.is_integer():
+            return str(int(value))
     s = str(value).strip()
     return "" if s.lower() == "nan" else s
 

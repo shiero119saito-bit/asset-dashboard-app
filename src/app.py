@@ -147,6 +147,29 @@ def yen(v: float) -> str:
     return f"¥{v:,.0f}"
 
 
+def show_table(df: pd.DataFrame, container=None, decimals: dict[str, int] | None = None) -> None:
+    """数値列に桁区切りを付けて表を描く。
+
+    文字列に変換せず pandas の Styler を使うのは、**数値としてのソートを保つ**ため
+    （列ヘッダをクリックしたときに文字列順に並ぶと表として使えない）。
+
+    小数桁は列ごとに自動判定する（全て整数なら0桁、小数を含むなら2桁）。
+    株数・評価額のような整数量に不要な小数点を出さないためで、明示したい列は
+    decimals で上書きする。
+    """
+    target = container if container is not None else st
+    formats: dict[str, str] = {}
+    for col in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        digits = (decimals or {}).get(col)
+        if digits is None:
+            values = df[col].dropna()
+            digits = 0 if len(values) == 0 or bool((values % 1 == 0).all()) else 2
+        formats[col] = f"{{:,.{digits}f}}"
+    target.dataframe(df.style.format(formats), width="stretch", hide_index=True)
+
+
 def _render_price_refresh(cfg: sg.StorageConfig | None) -> None:
     """時価の更新導線。保存先があれば GitHub Actions に依頼するボタンを出す。
 
@@ -228,7 +251,7 @@ def _render_simple_allocation(
     table_df = pd.DataFrame(
         {axis: labels, "現在%": [round(v, 1) for v in alloc.values()]}
     ).sort_values("現在%", ascending=False)
-    right.dataframe(table_df, width="stretch", hide_index=True)
+    show_table(table_df, right)
 
 
 def _merge_uploaded(
@@ -283,7 +306,7 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
             "asset_class": st.column_config.SelectboxColumn(
                 "資産クラス", options=list(pf.ASSET_CLASSES), required=True
             ),
-            "shares": st.column_config.NumberColumn("株数", min_value=0.0, format="%.4f"),
+            "shares": st.column_config.NumberColumn("株数", min_value=0.0, format="%d", step=1),
             "cost_per_share": st.column_config.NumberColumn("取得単価", min_value=0.0, format="%.2f"),
             "sector": st.column_config.TextColumn("商品種別"),
             "market": st.column_config.SelectboxColumn("上場市場", options=["jp", "us"]),
@@ -295,6 +318,9 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
             "source": st.column_config.TextColumn("証券会社"),
             "price": st.column_config.NumberColumn("保存時価", min_value=0.0, format="%.2f"),
             "price_asof": st.column_config.TextColumn("時価の日付"),
+            # 投資信託の基準価額取得に使う。上場銘柄では空欄のままでよい
+            "isin": st.column_config.TextColumn("ISIN（投信）"),
+            "assoc_fund_cd": st.column_config.TextColumn("協会コード（投信）"),
         },
     )
 
@@ -682,7 +708,7 @@ def main() -> None:
                 "ズレ": [round(drift[ac], 1) for ac in pf.ASSET_CLASSES],
             }
         )
-        right.dataframe(drift_df, width="stretch", hide_index=True)
+        show_table(drift_df, right)
     elif axis == "商品種別":
         _render_simple_allocation(axis, pf.allocation_by_sector(holdings), {}, left, right)
         st.caption("holdings.csv の sector 列。業種（電気機器・銀行 等）ではなく商品種別。")
@@ -722,7 +748,7 @@ def main() -> None:
     sector_df = pd.DataFrame(
         {"セクター": list(by_sector.keys()), "配当": [round(v) for v in by_sector.values()]}
     ).sort_values("配当", ascending=False)
-    s_col.dataframe(sector_df, width="stretch", hide_index=True)
+    show_table(sector_df, s_col)
 
     by_mkt = dv.dividend_by_market(holdings, div_map, pre_tax=pre_tax)
     mkt_df = pd.DataFrame(
@@ -756,7 +782,7 @@ def main() -> None:
             for h in holdings
         ]
     )
-    st.dataframe(table, width="stretch", hide_index=True)
+    show_table(table, decimals={"損益率%": 2, "構成比%": 1})
 
     # --- 日本個別株：高配当・優待 ---
     st.subheader("日本個別株：高配当・優待")
@@ -781,7 +807,7 @@ def main() -> None:
                     for h in group
                 ]
             )
-            st.dataframe(purpose_df, width="stretch", hide_index=True)
+            show_table(purpose_df)
 
     # --- 保有データの編集（普段の更新はここで完結させる） ---
     _render_holdings_editor(rows, sha, cfg)
