@@ -30,6 +30,9 @@ class _Stub:
     def tabs(self, labels):
         return [self for _ in labels]
 
+    def expander(self, label, **kw):
+        return self  # with 構文で使うため self を返す（no-op の lambda では入れない）
+
     def __enter__(self):
         return self
 
@@ -198,3 +201,19 @@ def test_main_runs_when_buttons_are_pressed(monkeypatch):
     前提のテストでは永久に検証されない。外部への書き込みはすべてスタブで塞いである。
     """
     _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS, press_buttons=True)
+
+
+def test_purpose_options_include_growth(monkeypatch):
+    """用途の選択肢に「資産形成」があること。
+
+    当初は日本個別株の高配当/優待を分ける列だったが、インデックス（オルカン等）は
+    資産最大化が目的で配当も優待も当てはまらず、未分類のままになっていた。
+    """
+    _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app",):
+        sys.modules.pop(mod, None)
+    import app
+
+    assert app.PURPOSE_LABELS_BY_VALUE["growth"] == "資産形成"
+    assert app.PURPOSE_LABELS[""] == "未分類"  # 取込直後の既定値は未分類のまま
+    assert set(app.PURPOSE_LABELS_BY_VALUE) == {"dividend", "growth", "yutai"}

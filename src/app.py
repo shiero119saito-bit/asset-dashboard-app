@@ -25,7 +25,11 @@ REAL_CSV = os.path.join(DATA_DIR, "holdings.csv")
 SAMPLE_CSV = os.path.join(DATA_DIR, "holdings.sample.csv")
 SETTINGS_JSON = os.path.join(DATA_DIR, "user_settings.json")  # 生年月日（.gitignore 済み）
 
-PURPOSE_LABELS = {"dividend": "配当", "yutai": "優待", "": "未分類"}
+# 保有目的。当初は日本個別株の「高配当か優待か」を分ける列だったが、
+# インデックス（オルカン等）は資産最大化が目的で配当も優待も目的ではないため growth を足した。
+# 空文字は未分類（取込直後の既定値）。
+PURPOSE_LABELS_BY_VALUE = {"dividend": "配当", "growth": "資産形成", "yutai": "優待"}
+PURPOSE_LABELS = {**PURPOSE_LABELS_BY_VALUE, "": "未分類"}
 SOURCE_LABELS = {"rakuten": "楽天", "sbi": "SBI", "": "手入力"}
 MARKET_LABELS = {"jp": "日本株", "us": "米国株"}
 
@@ -147,7 +151,12 @@ def yen(v: float) -> str:
     return f"¥{v:,.0f}"
 
 
-def show_table(df: pd.DataFrame, container=None, decimals: dict[str, int] | None = None) -> None:
+def show_table(
+    df: pd.DataFrame,
+    container=None,
+    decimals: dict[str, int] | None = None,
+    order_key: str | None = None,
+) -> None:
     """数値列に桁区切りを付けて表を描く。
 
     文字列に変換せず pandas の Styler を使うのは、**数値としてのソートを保つ**ため
@@ -156,8 +165,23 @@ def show_table(df: pd.DataFrame, container=None, decimals: dict[str, int] | None
     小数桁は列ごとに自動判定する（全て整数なら0桁、小数を含むなら2桁）。
     株数・評価額のような整数量に不要な小数点を出さないためで、明示したい列は
     decimals で上書きする。
+
+    order_key を渡すと列の並び替え UI を出す。Streamlit の表は**列のドラッグ移動に
+    対応していない**ため、multiselect の選択順（選んだ順に返る）を column_order に渡して
+    実現する。並びは session_state に残るので、操作のたびの再実行でも保たれる。
     """
     target = container if container is not None else st
+    columns = list(df.columns)
+
+    if order_key:
+        with target.expander("列の並び替え・表示", expanded=False):
+            chosen = st.multiselect(
+                "選んだ順に左から並びます（外した列は非表示）",
+                columns, default=columns, key=order_key,
+            )
+            # 全部外すと空の表になってしまうので、その場合は元の並びに戻す
+            columns = chosen or list(df.columns)
+
     formats: dict[str, str] = {}
     for col in df.columns:
         if not pd.api.types.is_numeric_dtype(df[col]):
@@ -167,7 +191,10 @@ def show_table(df: pd.DataFrame, container=None, decimals: dict[str, int] | None
             values = df[col].dropna()
             digits = 0 if len(values) == 0 or bool((values % 1 == 0).all()) else 2
         formats[col] = f"{{:,.{digits}f}}"
-    target.dataframe(df.style.format(formats), width="stretch", hide_index=True)
+
+    target.dataframe(
+        df.style.format(formats), width="stretch", hide_index=True, column_order=columns
+    )
 
 
 def _render_price_refresh(cfg: sg.StorageConfig | None) -> None:
@@ -251,7 +278,7 @@ def _render_simple_allocation(
     table_df = pd.DataFrame(
         {axis: labels, "現在%": [round(v, 1) for v in alloc.values()]}
     ).sort_values("現在%", ascending=False)
-    show_table(table_df, right)
+    show_table(table_df, right, order_key=f"cols_alloc_{axis}")
 
 
 def _merge_uploaded(
@@ -306,17 +333,19 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
             "asset_class": st.column_config.SelectboxColumn(
                 "資産クラス", options=list(pf.ASSET_CLASSES), required=True
             ),
-            "shares": st.column_config.NumberColumn("株数", min_value=0.0, format="%d", step=1),
-            "cost_per_share": st.column_config.NumberColumn("取得単価", min_value=0.0, format="%.2f"),
+            # 桁区切りは printf の "," 指定（Streamlit 1.30+ が sprintf-js を通す）。
+            # 株数・取得単価・時価は桁が大きく、区切りが無いと読み違える
+            "shares": st.column_config.NumberColumn("株数", min_value=0.0, format="%,d", step=1),
+            "cost_per_share": st.column_config.NumberColumn("取得単価", min_value=0.0, format="%,.2f"),
             "sector": st.column_config.TextColumn("商品種別"),
             "market": st.column_config.SelectboxColumn("上場市場", options=["jp", "us"]),
-            "div_per_share": st.column_config.NumberColumn("1株配当", min_value=0.0),
+            "div_per_share": st.column_config.NumberColumn("1株配当", min_value=0.0, format="%,.2f"),
             "purpose": st.column_config.SelectboxColumn(
-                "用途", options=["", "dividend", "yutai"],
-                help="dividend=高配当目的 / yutai=優待目的（日本個別株のみ集計に使う）",
+                "用途", options=[""] + list(PURPOSE_LABELS_BY_VALUE),
+                help="保有目的。dividend=配当収入 / growth=資産形成（インデックス）/ yutai=優待",
             ),
             "source": st.column_config.TextColumn("証券会社"),
-            "price": st.column_config.NumberColumn("保存時価", min_value=0.0, format="%.2f"),
+            "price": st.column_config.NumberColumn("保存時価", min_value=0.0, format="%,.2f"),
             "price_asof": st.column_config.TextColumn("時価の日付"),
             # 投資信託の基準価額取得に使う。上場銘柄では空欄のままでよい
             "isin": st.column_config.TextColumn("ISIN（投信）"),
@@ -708,7 +737,7 @@ def main() -> None:
                 "ズレ": [round(drift[ac], 1) for ac in pf.ASSET_CLASSES],
             }
         )
-        show_table(drift_df, right)
+        show_table(drift_df, right, order_key="cols_drift")
     elif axis == "商品種別":
         _render_simple_allocation(axis, pf.allocation_by_sector(holdings), {}, left, right)
         st.caption("holdings.csv の sector 列。業種（電気機器・銀行 等）ではなく商品種別。")
@@ -782,7 +811,7 @@ def main() -> None:
             for h in holdings
         ]
     )
-    show_table(table, decimals={"損益率%": 2, "構成比%": 1})
+    show_table(table, decimals={"損益率%": 2, "構成比%": 1}, order_key="cols_holdings")
 
     # --- 日本個別株：高配当・優待 ---
     st.subheader("日本個別株：高配当・優待")
@@ -807,7 +836,7 @@ def main() -> None:
                     for h in group
                 ]
             )
-            show_table(purpose_df)
+            show_table(purpose_df, order_key=f"cols_purpose_{key or 'none'}")
 
     # --- 保有データの編集（普段の更新はここで完結させる） ---
     _render_holdings_editor(rows, sha, cfg)
