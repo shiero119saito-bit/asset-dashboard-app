@@ -26,10 +26,11 @@ class _Response:
 class _RequestsStub(types.ModuleType):
     """requests の最小スタブ。呼び出し内容を記録する。"""
 
-    def __init__(self, get_result=None, put_result=None):
+    def __init__(self, get_result=None, put_result=None, post_result=None):
         super().__init__("requests")
         self._get_result = get_result
         self._put_result = put_result
+        self._post_result = post_result
         self.calls: list[tuple] = []
 
     def get(self, url, **kw):
@@ -43,6 +44,12 @@ class _RequestsStub(types.ModuleType):
         if isinstance(self._put_result, Exception):
             raise self._put_result
         return self._put_result
+
+    def post(self, url, **kw):
+        self.calls.append(("POST", url, kw))
+        if isinstance(self._post_result, Exception):
+            raise self._post_result
+        return self._post_result
 
 
 def _install(monkeypatch, stub):
@@ -176,6 +183,46 @@ def test_save_error_message_names_exception_type(monkeypatch):
     ok, msg = sg.save(CFG, "x", None, "m")
     assert ok is False
     assert "ConnectionError" in msg and "t0ken" not in msg
+
+
+# --- Actions の起動（アプリの「時価を今すぐ更新」）---
+
+
+def test_trigger_workflow_posts_dispatch_with_branch(monkeypatch):
+    stub = _install(monkeypatch, _RequestsStub(post_result=_Response(204)))
+    ok, msg = sg.trigger_workflow(CFG)
+    assert ok is True
+    method, url, kw = stub.calls[0]
+    assert method == "POST"
+    assert url.endswith("/repos/me/data/actions/workflows/refresh-prices.yml/dispatches")
+    assert kw["json"] == {"ref": "main"}
+    assert kw["headers"]["Authorization"] == "Bearer t0ken"
+
+
+def test_trigger_workflow_403_tells_which_permission_to_add(monkeypatch):
+    # Contents だけのトークンでは起動できない。設定漏れなので直し方を返す
+    _install(monkeypatch, _RequestsStub(post_result=_Response(403)))
+    ok, msg = sg.trigger_workflow(CFG)
+    assert ok is False and "Actions" in msg
+
+
+def test_trigger_workflow_404_points_at_missing_workflow(monkeypatch):
+    _install(monkeypatch, _RequestsStub(post_result=_Response(404)))
+    ok, msg = sg.trigger_workflow(CFG, "refresh-prices.yml")
+    assert ok is False and "refresh-prices.yml" in msg
+
+
+def test_trigger_workflow_is_safe_without_config_or_network(monkeypatch):
+    assert sg.trigger_workflow(None)[0] is False
+    _install(monkeypatch, _RequestsStub(post_result=ConnectionError("offline")))
+    ok, msg = sg.trigger_workflow(CFG)
+    assert ok is False and "ConnectionError" in msg
+
+
+def test_trigger_workflow_never_leaks_token(monkeypatch):
+    for result in (_Response(403), _Response(500), ConnectionError("boom")):
+        _install(monkeypatch, _RequestsStub(post_result=result))
+        assert "t0ken" not in sg.trigger_workflow(CFG)[1]
 
 
 def test_check_distinguishes_states(monkeypatch):

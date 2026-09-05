@@ -82,29 +82,45 @@ class _ColumnConfig:
         return lambda *a, **kw: None
 
 
+class _CacheData:
+    """st.cache_data のスタブ。デコレータとしても `.clear()` としても使われる。
+
+    メソッドで実装すると `st.cache_data.clear()` が bound method への属性参照になり
+    AttributeError になるため、呼び出し可能なオブジェクトにする。
+    """
+
+    def __call__(self, *a, **kw):
+        if a and callable(a[0]):  # @st.cache_data（引数なし）
+            return a[0]
+        return lambda fn: fn      # @st.cache_data(...)（引数つき）
+
+    def clear(self):
+        return None
+
+
 class _Secrets(dict):
+    """未設定のキーは KeyError＝ローカル相当。渡した分だけ設定済みとして振る舞う。"""
+
     def __getitem__(self, key):
-        raise KeyError(key)  # secrets 未設定＝ローカル相当
+        if key in self.keys():
+            return dict.__getitem__(self, key)
+        raise KeyError(key)
 
 
 class _StreamlitStub(_Stub):
     """モジュールとして振る舞うスタブ（未定義の st.xxx は no-op を返す）。"""
 
-    def __init__(self, use_live: bool):
+    def __init__(self, use_live: bool, secrets: dict | None = None):
         super().__init__()
         self.sidebar = _Stub()
-        self.secrets = _Secrets()
+        self.secrets = _Secrets(secrets or {})
         self.column_config = _ColumnConfig()
+        self.session_state: dict = {}  # 実物は dict ライク。get/pop がそのまま使える
+        self.cache_data = _CacheData()
         self._use_live = use_live
 
     def set_page_config(self, **kw):
         return None
-
-    def cache_data(self, *a, **kw):
-        # @st.cache_data / @st.cache_data(...) の両形式を素通しにする
-        if a and callable(a[0]):
-            return a[0]
-        return lambda fn: fn
 
     def stop(self):
         raise AssertionError("st.stop が呼ばれた（データ読込に失敗している）")
@@ -113,11 +129,46 @@ class _StreamlitStub(_Stub):
         return self._use_live
 
 
-def _install_streamlit_stub(monkeypatch, use_live: bool):
-    st = _StreamlitStub(use_live)
+def _install_streamlit_stub(monkeypatch, use_live: bool, secrets: dict | None = None):
+    st = _StreamlitStub(use_live, secrets)
     st.sidebar.checkbox = st.checkbox
     monkeypatch.setitem(sys.modules, "streamlit", st)
     return st
+
+
+# 保存先が設定済みの状態（クラウドの実状態）。通信は下でスタブに差し替える
+STORAGE_SECRETS = {"storage": {"token": "t", "owner": "o", "repo": "r"}}
+
+
+def _run_main(
+    monkeypatch, use_live: bool, secrets: dict | None = None, press_buttons: bool = False
+):
+    st = _install_streamlit_stub(monkeypatch, use_live, secrets)
+    if press_buttons:
+        st.button = lambda label, **kw: True
+        st.sidebar.button = st.button
+
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+
+    import prices as pr
+    import storage as sg
+
+    # 通信させない：ライブ取得は常に空＝保存時価/取得単価へフォールバックする経路
+    monkeypatch.setattr(pr, "fetch_prices", lambda tickers: {})
+    monkeypatch.setattr(pr, "fetch_dividends", lambda tickers: {})
+    monkeypatch.setattr(pr, "fetch_dividend_months", lambda tickers: {})
+    monkeypatch.setattr(pr, "fetch_fx_rate", lambda: None)
+    # 書き込み系も必ず塞ぐ。テストが GitHub へ実際に PUT / dispatch すると事故になる
+    monkeypatch.setattr(sg, "load", lambda cfg: (None, None))
+    monkeypatch.setattr(sg, "save", lambda *a, **kw: (True, "保存しました。"))
+    monkeypatch.setattr(sg, "check", lambda cfg: (True, "接続できました。"))
+    monkeypatch.setattr(sg, "trigger_workflow", lambda *a, **kw: (True, "依頼しました。"))
+
+    import app
+
+    monkeypatch.setattr(app, "save_birth_date", lambda birth: True)  # 設定ファイルを汚さない
+    app.main()  # 例外が出なければ成功
 
 
 @pytest.mark.parametrize("use_live", [False, True])
@@ -126,18 +177,24 @@ def test_main_runs_without_error(monkeypatch, use_live):
 
     use_live=True でライブ取得が空になる経路（=クラウドで起きた状態）も通す。
     """
-    _install_streamlit_stub(monkeypatch, use_live)
-    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation"):
-        sys.modules.pop(mod, None)
+    _run_main(monkeypatch, use_live)
 
-    import prices as pr
 
-    # 通信させない：ライブ取得は常に空＝保存時価/取得単価へフォールバックする経路
-    monkeypatch.setattr(pr, "fetch_prices", lambda tickers: {})
-    monkeypatch.setattr(pr, "fetch_dividends", lambda tickers: {})
-    monkeypatch.setattr(pr, "fetch_dividend_months", lambda tickers: {})
-    monkeypatch.setattr(pr, "fetch_fx_rate", lambda: None)
+@pytest.mark.parametrize("use_live", [False, True])
+def test_main_runs_with_storage_configured(monkeypatch, use_live):
+    """保存先が設定済みの経路も通すこと。
 
-    import app
+    クラウドは常にこちら（保存ボタン・時価更新ボタンが出る側）で動く。
+    未設定の経路だけ緑にして安心していると、画面にしか現れない不具合を素通しする
+    ＝実際に UnboundLocalError をクラウドで踏んだのと同じ穴になる。
+    """
+    _run_main(monkeypatch, use_live, STORAGE_SECRETS)
 
-    app.main()  # 例外が出なければ成功
+
+def test_main_runs_when_buttons_are_pressed(monkeypatch):
+    """ボタンを押した経路も例外なく走ること（保存・接続確認・時価更新・再読込）。
+
+    押下時にしか通らない呼び出し（`st.cache_data.clear()` など）は、押されていない
+    前提のテストでは永久に検証されない。外部への書き込みはすべてスタブで塞いである。
+    """
+    _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS, press_buttons=True)

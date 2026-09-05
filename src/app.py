@@ -16,6 +16,7 @@ import dataio
 import dividend as dv
 import portfolio as pf
 import prices as pr
+import pricing_update as pu
 import simulation as sm
 import storage as sg
 
@@ -144,6 +145,68 @@ def load_rows(uploaded_text: str | None = None) -> tuple[list[dict], str, str | 
 
 def yen(v: float) -> str:
     return f"¥{v:,.0f}"
+
+
+def _render_price_refresh(cfg: sg.StorageConfig | None) -> None:
+    """時価の更新導線。保存先があれば GitHub Actions に依頼するボタンを出す。
+
+    アプリ自身は Yahoo から時価を取れない（Streamlit Cloud の IP が 401 で弾かれる）ため、
+    取得できる場所＝Actions に肩代わりさせる。押した時だけ起動する（自動起動にしない）：
+    Streamlit は操作のたびにスクリプト全体を再実行するため、自動にすると画面を触るたびに
+    Actions が走ってしまう。
+    """
+    if cfg is None:
+        st.caption(
+            "PCで `python 400_Asset-management/scripts/refresh_prices.py --local` を実行すると"
+            " price 列が更新される。"
+        )
+        return
+
+    left, right, _ = st.columns([1, 1, 3])
+    if left.button("時価を今すぐ更新", key="trigger_refresh"):
+        st.session_state["refresh_result"] = sg.trigger_workflow(cfg)
+    if right.button("読み込み直す", key="reload_after_refresh",
+                    help="更新が終わった頃に押すと最新の時価を読み直す"):
+        st.cache_data.clear()
+        st.session_state.pop("refresh_result", None)
+        st.rerun()
+
+    result = st.session_state.get("refresh_result")
+    if result:
+        ok, message = result
+        (st.success if ok else st.error)(message)
+
+
+def _render_price_status(
+    rows: list[dict], holdings: list[pf.Holding], cfg: sg.StorageConfig | None
+) -> None:
+    """ライブ時価が取れないときに、保存時価の鮮度と更新導線を出す。
+
+    取れない原因は通信不可のほか API 仕様変更や IP 制限もありうる
+    （2026-09-02：yfinance のキーが camelCase 化して全滅／クラウドは Yahoo が 401）。
+    保存時価が効いたかは Holding から見る（rows の生値には pandas の "nan" が混ざる）。
+    """
+    saved_count = sum(1 for h in holdings if h.price_asof)
+    if saved_count:
+        asof_dates = sorted({h.price_asof for h in holdings if h.price_asof})
+        days = pu.stale_days(rows, date.today())
+        age = "今日" if days == 0 else f"{days}日前" if days else ""
+        st.info(
+            f"保存された時価で評価しています（{asof_dates[-1]} 時点"
+            + (f"・{age}" if age else "")
+            + f"・{saved_count}/{len(holdings)}銘柄）。"
+        )
+    else:
+        has_price_column = any("price" in r for r in rows)
+        st.warning(
+            "時価が無いため取得単価で評価しています（含み損益は0になる）。"
+            + (
+                "price 列はあるが有効な値が入っていない。"
+                if has_price_column
+                else "price 列が無い＝取込データが古い。"
+            )
+        )
+    _render_price_refresh(cfg)
 
 
 def _render_simple_allocation(
@@ -565,29 +628,8 @@ def main() -> None:
         price_map = pr.convert_us_values_to_jpy(price_map, us_tickers, fx_rate)
     holdings = pf.build_holdings(rows, price_map)
 
-    if use_live and not price_map:
-        # 全銘柄で取れないのは通信不可のほかに API 仕様変更やIP制限もありうる
-        # （2026-09-02：yfinance のキーが camelCase 化して全滅／クラウドは Yahoo が 401）
-        # 保存時価が効いたかは Holding から見る（rows の生値には pandas の "nan" が混ざる）
-        asof_dates = sorted({h.price_asof for h in holdings if h.price_asof})
-        saved_count = sum(1 for h in holdings if h.price_asof)
-        if saved_count:
-            st.info(
-                f"ライブ時価を取得できないため、取込時に保存した時価で評価します"
-                f"（{asof_dates[-1]} 時点・{saved_count}/{len(holdings)}銘柄）。"
-            )
-        else:
-            has_price_column = any("price" in r for r in rows)
-            st.warning(
-                "時価を取得できず、保存された時価もありません（取得単価で評価するため含み損益は0）。"
-                + (
-                    "データに price 列はあるが有効な値が入っていない。"
-                    if has_price_column
-                    else "データに price 列がない＝取込データが古い。"
-                )
-                + " ローカルで `python scripts/import_holdings.py --refresh-prices` を実行し、"
-                "生成された holdings.csv でデータを更新すること。"
-            )
+    if not price_map:
+        _render_price_status(rows, holdings, cfg)
 
     # 配当データ：CSV div_per_share を優先、空は yfinance で補完
     div_map = {str(r["ticker"]).strip(): float(r["div_per_share"])

@@ -107,6 +107,49 @@ def check(cfg: StorageConfig | None) -> tuple[bool, str]:
     return (False, f"接続に失敗しました（HTTP {res.status_code}）。")
 
 
+def trigger_workflow(
+    cfg: StorageConfig | None, workflow_file: str = "refresh-prices.yml"
+) -> tuple[bool, str]:
+    """保存先 repo の GitHub Actions を起動する（workflow_dispatch）。
+
+    アプリ自身は Yahoo Finance から時価を取得できない（Streamlit Cloud の IP が 401 で
+    弾かれる）ため、取得できる場所＝Actions に肩代わりさせる。画面のボタンから呼ぶ。
+
+    起動は非同期で、成功は「受け付けられた」ことしか意味しない（204 No Content）。
+    完了は数十秒後になるため、呼び出し側は再読込を促すこと。
+
+    Contents しか許可していないトークンでは 403 になる。これは設定漏れであって
+    障害ではないので、何を足せばよいかを本文に書いて返す。
+    """
+    if cfg is None:
+        return (False, "保存先が設定されていません。")
+    try:
+        import requests
+    except ImportError:
+        return (False, "requests が導入されていません。")
+
+    url = (
+        f"{API_ROOT}/repos/{cfg.owner}/{cfg.repo}/actions/workflows/"
+        f"{workflow_file}/dispatches"
+    )
+    try:
+        res = requests.post(
+            url, headers=_headers(cfg), json={"ref": cfg.branch}, timeout=TIMEOUT_SECONDS
+        )
+    except Exception as e:
+        return (False, f"更新を依頼できませんでした（{type(e).__name__}）。")
+
+    if res.status_code == 204:
+        return (True, "時価の更新を依頼しました（1分ほどで反映されます）。")
+    if res.status_code in (401, 403):
+        return (False, "トークンに Actions の権限がありません"
+                       "（Permissions に Actions: Read and write を追加してください）。")
+    if res.status_code == 404:
+        return (False, f"更新の仕組みが見つかりません（{workflow_file} が保存先 repo に"
+                       "置かれていないか、まだ既定ブランチに入っていません）。")
+    return (False, f"更新を依頼できませんでした（HTTP {res.status_code}）。")
+
+
 def load(cfg: StorageConfig | None) -> tuple[str | None, str | None]:
     """保存先から CSV 本文と sha を返す。取得できなければ (None, None)。
 
