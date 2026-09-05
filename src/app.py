@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from datetime import date
 
@@ -19,6 +20,7 @@ import prices as pr
 import pricing_update as pu
 import simulation as sm
 import storage as sg
+import viewsettings as vs
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 REAL_CSV = os.path.join(DATA_DIR, "holdings.csv")
@@ -151,11 +153,36 @@ def yen(v: float) -> str:
     return f"¥{v:,.0f}"
 
 
+# 表示設定（列の並び）は保有データと同じ repo の別ファイルに置く。
+# session_state だけだとブラウザを閉じるたびに並びをやり直すことになる
+VIEW_SETTINGS_PATH = "view_settings.json"
+VIEW_ORDERS_STATE = "view_orders"
+
+
+def view_settings_config(cfg: sg.StorageConfig | None) -> sg.StorageConfig | None:
+    """保存先設定の path だけを表示設定ファイルに差し替える。"""
+    return dataclasses.replace(cfg, path=VIEW_SETTINGS_PATH) if cfg else None
+
+
+def load_view_orders(cfg: sg.StorageConfig | None) -> dict[str, list[str]]:
+    """保存された列順を読む。未設定・未作成なら空 dict（＝既定の並び）。"""
+    text, _ = sg.load(view_settings_config(cfg))
+    return vs.parse_orders(text)
+
+
+def save_view_orders(cfg: sg.StorageConfig | None, orders: dict[str, list[str]]) -> tuple[bool, str]:
+    """列順を保存先へ書き戻す。sha を取り直してから書く（他端末の更新を弾く）。"""
+    target = view_settings_config(cfg)
+    _, sha = sg.load(target)
+    return sg.save(target, vs.serialize_orders(orders), sha, "update view settings")
+
+
 def show_table(
     df: pd.DataFrame,
     container=None,
     decimals: dict[str, int] | None = None,
     order_key: str | None = None,
+    cfg: sg.StorageConfig | None = None,
 ) -> None:
     """数値列に桁区切りを付けて表を描く。
 
@@ -168,19 +195,34 @@ def show_table(
 
     order_key を渡すと列の並び替え UI を出す。Streamlit の表は**列のドラッグ移動に
     対応していない**ため、multiselect の選択順（選んだ順に返る）を column_order に渡して
-    実現する。並びは session_state に残るので、操作のたびの再実行でも保たれる。
+    実現する。「この並びを保存」を押すと保存先に残り、次回以降その並びで開く。
     """
     target = container if container is not None else st
     columns = list(df.columns)
 
     if order_key:
+        if order_key not in st.session_state:
+            # 初回だけ保存済みの並びを入れる。key 付き multiselect は session_state が
+            # default より優先されるため、default では保存値を反映できない
+            saved = st.session_state.get(VIEW_ORDERS_STATE, {}).get(order_key)
+            st.session_state[order_key] = vs.resolve_order(saved, columns)
+
         with target.expander("列の並び替え・表示", expanded=False):
             chosen = st.multiselect(
-                "選んだ順に左から並びます（外した列は非表示）",
-                columns, default=columns, key=order_key,
+                "選んだ順に左から並びます（外した列は非表示）", columns, key=order_key,
             )
             # 全部外すと空の表になってしまうので、その場合は元の並びに戻す
             columns = chosen or list(df.columns)
+
+            if cfg is not None and st.button("この並びを保存", key=f"save_{order_key}"):
+                orders = dict(st.session_state.get(VIEW_ORDERS_STATE, {}))
+                orders[order_key] = columns
+                ok, message = save_view_orders(cfg, orders)
+                if ok:
+                    st.session_state[VIEW_ORDERS_STATE] = orders
+                    st.success("この並びを次回以降も使います。")
+                else:
+                    st.error(message)
 
     formats: dict[str, str] = {}
     for col in df.columns:
