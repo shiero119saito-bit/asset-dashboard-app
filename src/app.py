@@ -84,8 +84,15 @@ def cached_price_history(tickers: tuple[str, ...], years: int):
     return pr.fetch_price_history(list(tickers), years)
 
 
-def load_birth_date() -> date | None:
-    """保存済みの生年月日を読む。未保存・読めない場合は None（＝未設定）。"""
+def load_birth_date(cfg: sg.StorageConfig | None = None) -> date | None:
+    """保存済みの生年月日を読む。未保存・読めない場合は None（＝未設定）。
+
+    保存先（private repo）→ ローカルファイルの順に探す。Streamlit Cloud は
+    コンテナが揮発するためローカルに書いても再起動で消える。保存先があればそちらを正とする。
+    """
+    text, _ = sg.load(user_settings_config(cfg))
+    if text:
+        return dataio.parse_birth_date(text)
     try:
         with open(SETTINGS_JSON, encoding="utf-8") as f:
             return dataio.parse_birth_date(f.read())
@@ -93,15 +100,24 @@ def load_birth_date() -> date | None:
         return None
 
 
-def save_birth_date(birth: date) -> bool:
-    """生年月日をローカルへ保存する。書き込めない環境（クラウド等）では False。"""
+def save_birth_date(birth: date, cfg: sg.StorageConfig | None = None) -> tuple[bool, str]:
+    """生年月日を保存する。(成功したか, 利用者向けメッセージ)。
+
+    保存先があれば private repo へ書く（端末をまたいで残る）。無ければ従来どおり
+    ローカルファイルへ書く（クラウドでは再起動で消えるため、その旨を返す）。
+    """
+    if cfg is not None:
+        target = user_settings_config(cfg)
+        _, sha = sg.load(target)
+        ok, message = sg.save(target, dataio.serialize_birth_date(birth), sha, "update birth date")
+        return (ok, f"保存した（{birth}）" if ok else message)
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         with open(SETTINGS_JSON, "w", encoding="utf-8") as f:
             f.write(dataio.serialize_birth_date(birth))
-        return True
+        return (True, f"保存した（{birth}）")
     except OSError:
-        return False
+        return (False, "保存できなかった（書き込み不可の環境）。今回のみ有効。")
 
 
 def _secrets_holdings_csv() -> str | None:
@@ -153,15 +169,22 @@ def yen(v: float) -> str:
     return f"¥{v:,.0f}"
 
 
-# 表示設定（列の並び）は保有データと同じ repo の別ファイルに置く。
-# session_state だけだとブラウザを閉じるたびに並びをやり直すことになる
-VIEW_SETTINGS_PATH = "view_settings.json"
+# 設定類は保有データと同じ repo の別ファイルに置く。session_state もローカルファイルも
+# ブラウザを閉じる／コンテナが再起動すると消えるため、端末をまたいで残らない
+VIEW_SETTINGS_PATH = "view_settings.json"   # 列の並び順
+USER_SETTINGS_PATH = "user_settings.json"   # 生年月日（機微情報。repo は Private）
 VIEW_ORDERS_STATE = "view_orders"
+BIRTH_DATE_STATE = "birth_date"
 
 
 def view_settings_config(cfg: sg.StorageConfig | None) -> sg.StorageConfig | None:
     """保存先設定の path だけを表示設定ファイルに差し替える。"""
     return dataclasses.replace(cfg, path=VIEW_SETTINGS_PATH) if cfg else None
+
+
+def user_settings_config(cfg: sg.StorageConfig | None) -> sg.StorageConfig | None:
+    """保存先設定の path だけを個人設定ファイルに差し替える。"""
+    return dataclasses.replace(cfg, path=USER_SETTINGS_PATH) if cfg else None
 
 
 def load_view_orders(cfg: sg.StorageConfig | None) -> dict[str, list[str]]:
@@ -424,21 +447,27 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
         (right.success if ok else right.error)(message)
 
 
-def _render_birth_date_input() -> date | None:
+def _render_birth_date_input(cfg: sg.StorageConfig | None = None) -> date | None:
     """サイドバーで生年月日を入力・保存し、現在の設定値を返す。
 
-    保存はローカルファイル。Streamlit Cloud のようにコンテナが揮発する環境では
-    再起動で消えるため、その場合は都度入力になる（保存失敗を画面で伝える）。
+    保存先があれば private repo に置くので、端末をまたいで残る。無ければ従来どおり
+    ローカルファイル（Streamlit Cloud はコンテナが揮発するため再起動で消える）。
+
+    読み込みは1セッションに1回だけ（再実行のたびに API を叩かない）。
     """
     st.sidebar.subheader("シミュレーション設定")
-    saved = load_birth_date()
+    if BIRTH_DATE_STATE not in st.session_state:
+        st.session_state[BIRTH_DATE_STATE] = load_birth_date(cfg)
+    saved = st.session_state[BIRTH_DATE_STATE]
+
     birth = st.sidebar.date_input(
         "生年月日",
         value=saved or date(1980, 1, 1),
         min_value=date(1930, 1, 1),
         max_value=date.today(),
         format="YYYY/MM/DD",
-        help="年齢を自動計算してシミュレーションの期間に使う。ローカルにのみ保存する。",
+        help="年齢を自動計算してシミュレーションの期間に使う。"
+             + ("保存先（private repo）に保存する。" if cfg else "ローカルにのみ保存する。"),
     )
 
     if saved is None:
@@ -447,10 +476,12 @@ def _render_birth_date_input() -> date | None:
         st.sidebar.caption(f"保存済み：{saved}（変更後は保存を押す）")
 
     if st.sidebar.button("生年月日を保存"):
-        if save_birth_date(birth):
-            st.sidebar.success(f"保存した（{birth}）")
+        ok, message = save_birth_date(birth, cfg)
+        if ok:
+            st.session_state[BIRTH_DATE_STATE] = birth
+            st.sidebar.success(message)
         else:
-            st.sidebar.warning("保存できなかった（書き込み不可の環境）。今回のみ有効。")
+            st.sidebar.warning(message)
     return birth
 
 

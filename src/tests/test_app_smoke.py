@@ -170,7 +170,8 @@ def _run_main(
 
     import app
 
-    monkeypatch.setattr(app, "save_birth_date", lambda birth: True)  # 設定ファイルを汚さない
+    # 設定ファイルを汚さない／GitHub へ書かない
+    monkeypatch.setattr(app, "save_birth_date", lambda birth, cfg=None: (True, "保存した"))
     app.main()  # 例外が出なければ成功
 
 
@@ -217,3 +218,51 @@ def test_purpose_options_include_growth(monkeypatch):
     assert app.PURPOSE_LABELS_BY_VALUE["growth"] == "資産形成"
     assert app.PURPOSE_LABELS[""] == "未分類"  # 取込直後の既定値は未分類のまま
     assert set(app.PURPOSE_LABELS_BY_VALUE) == {"dividend", "growth", "yutai"}
+
+
+def _app_with_storage_stub(monkeypatch, saved: dict):
+    """storage を書き込み記録用スタブに差し替えた app を返す。"""
+    _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "storage"):
+        sys.modules.pop(mod, None)
+    import storage as sg
+
+    monkeypatch.setattr(sg, "load", lambda cfg: (None, None))
+    monkeypatch.setattr(
+        sg, "save",
+        lambda cfg, text, sha, msg: (saved.update(path=cfg.path, text=text), (True, "ok"))[1],
+    )
+    import app
+    return app, sg
+
+
+def test_settings_are_written_to_their_own_files_not_holdings(monkeypatch):
+    """設定の保存が holdings.csv を上書きしないこと。
+
+    保存先の指定は path だけを差し替える実装なので、差し替えを忘れると**資産データを
+    設定ファイルで丸ごと潰す**。取り返しがつかないため、パスを固定して守る。
+    """
+    saved: dict = {}
+    app, sg = _app_with_storage_stub(monkeypatch, saved)
+    cfg = sg.StorageConfig(token="t", owner="o", repo="r", path="holdings.csv")
+
+    ok, _ = app.save_birth_date(date(1983, 8, 21), cfg)
+    assert ok and saved["path"] == "user_settings.json"
+    assert "1983-08-21" in saved["text"]
+
+    saved.clear()
+    ok, _ = app.save_view_orders(cfg, {"cols_holdings": ["銘柄"]})
+    assert ok and saved["path"] == "view_settings.json"
+    assert "cols_holdings" in saved["text"]
+
+
+def test_birth_date_falls_back_to_local_file_without_storage(monkeypatch, tmp_path):
+    # 保存先が未設定なら従来どおりローカルへ書く（ローカル起動を壊さない）
+    saved: dict = {}
+    app, _ = _app_with_storage_stub(monkeypatch, saved)
+    monkeypatch.setattr(app, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(app, "SETTINGS_JSON", str(tmp_path / "user_settings.json"))
+
+    ok, _ = app.save_birth_date(date(1983, 8, 21), None)
+    assert ok and saved == {}  # storage へは書かない
+    assert app.load_birth_date(None) == date(1983, 8, 21)
