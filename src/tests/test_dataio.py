@@ -165,3 +165,75 @@ def test_rows_without_fund_columns_still_serialize():
     # 既存データ（isin 列を持たない）が後方互換で通ること
     text = dataio.serialize_holdings_csv([{"ticker": "1343", "shares": 40}])
     assert text.strip().split("\n")[1].endswith(",,")
+
+
+# --- 口座区分（複合キーと分類の引き継ぎ）---
+
+
+def test_merge_keeps_same_ticker_in_different_accounts():
+    """同一銘柄でも口座が違えば別の行として残す（税率が違うため）。"""
+    existing = [{
+        "ticker": "1605", "name": "INPEX", "asset_class": "jp_dividend", "shares": "10",
+        "cost_per_share": "1500", "source": "rakuten", "account": "specific",
+    }]
+    imported = [
+        {"ticker": "1605", "name": "INPEX", "shares": 5.0, "cost_per_share": 1800.0,
+         "account": "nisa_growth"},
+    ]
+    merged = dataio.merge_holdings(existing, imported, source="rakuten")
+    by_account = {row["account"]: row for row in merged}
+    assert set(by_account) == {"specific", "nisa_growth"}
+    assert by_account["specific"]["shares"] == "10"
+    assert by_account["nisa_growth"]["shares"] == 5.0
+
+
+def test_merge_inherits_classification_when_row_splits_by_account():
+    """再取込で1行が口座別に分かれても、分類と ISIN を引き継ぐこと。
+
+    引き継がないと「新規銘柄」として既定分類になり、purpose も isin も消える。
+    isin が消えると投資信託の基準価額が取れなくなり、評価額が取得単価に戻る。
+    """
+    existing = [{
+        "ticker": "オルカン", "name": "オルカン", "asset_class": "index", "shares": "100",
+        "cost_per_share": "2.4", "sector": "投資信託", "market": "jp", "div_per_share": "",
+        "purpose": "growth", "source": "rakuten", "account": "specific",
+        "isin": "JP90C000H1T1", "assoc_fund_cd": "0331418A",
+    }]
+    imported = [
+        {"ticker": "オルカン", "name": "オルカン", "shares": 60.0, "cost_per_share": 2.4,
+         "account": "nisa_tsumitate"},
+        {"ticker": "オルカン", "name": "オルカン", "shares": 40.0, "cost_per_share": 2.5,
+         "account": "nisa_old"},
+    ]
+    merged = dataio.merge_holdings(existing, imported, source="rakuten")
+    new_rows = [r for r in merged if r["account"] in ("nisa_tsumitate", "nisa_old")]
+    assert len(new_rows) == 2
+    for row in new_rows:
+        assert row["isin"] == "JP90C000H1T1"
+        assert row["assoc_fund_cd"] == "0331418A"
+        assert row["asset_class"] == "index"
+        assert row["purpose"] == "growth"
+        assert row["sector"] == "投資信託"
+
+
+def test_merge_treats_blank_account_as_specific():
+    """既存行の account が空欄でも、取込行の specific と同じ行として扱う。
+
+    別扱いにすると、取込のたびに同じ保有が二重に増える。
+    """
+    existing = [{
+        "ticker": "1605", "name": "INPEX", "asset_class": "jp_dividend", "shares": "10",
+        "cost_per_share": "1500", "source": "rakuten", "account": "",
+    }]
+    imported = [{"ticker": "1605", "name": "INPEX", "shares": 20.0, "cost_per_share": 1600.0}]
+    merged = dataio.merge_holdings(existing, imported, source="rakuten")
+    assert len(merged) == 1
+    assert merged[0]["shares"] == 20.0
+    assert merged[0]["account"] == "specific"
+
+
+def test_account_column_is_in_canonical_order():
+    assert "account" in dataio.HOLDINGS_COLUMNS
+    assert dataio.normalize_account(None) == "specific"
+    assert dataio.normalize_account("nan") == "specific"
+    assert dataio.normalize_account(" nisa_old ") == "nisa_old"

@@ -17,14 +17,36 @@ TAX_RATE = {
     "us": 0.282835,
 }
 
+# NISA口座（旧NISA・つみたて投資枠・成長投資枠）の税率。
+# **国内課税は非課税だが、米国株の配当は現地で10%源泉徴収される**（NISAでは外国税額控除も
+# 使えないため取り戻せない）。ここを0%にすると手取りを過大表示するので分けて持つ。
+NISA_TAX_RATE = {
+    "jp": 0.0,
+    "us": 0.10,
+}
+
+# 課税口座として扱う account の値。**空欄は特定口座扱い**（未設定のデータで
+# 非課税と誤表示しないための安全側の既定）
+TAXABLE_ACCOUNTS = {"", "specific"}
+
 # 月別バケットで権利確定月が不明な配当を入れるキー
 UNKNOWN_MONTH = "不明"
 
 
-def after_tax(amount: float, market: str) -> float:
-    """税抜配当額。未知 market は jp 税率を適用。"""
-    rate = TAX_RATE.get(market, TAX_RATE["jp"])
-    return amount * (1.0 - rate)
+def is_taxable(account: str) -> bool:
+    """その口座区分が課税対象か。空欄・未知の値は課税（安全側）。"""
+    return str(account or "").strip().lower() in TAXABLE_ACCOUNTS
+
+
+def tax_rate_for(market: str, account: str = "") -> float:
+    """market（jp/us）と口座区分に対する配当の税率。"""
+    rates = TAX_RATE if is_taxable(account) else NISA_TAX_RATE
+    return rates.get(market, rates["jp"])
+
+
+def after_tax(amount: float, market: str, account: str = "") -> float:
+    """税抜配当額。未知 market は jp 税率を適用。account 未指定は特定口座扱い。"""
+    return amount * (1.0 - tax_rate_for(market, account))
 
 
 def annual_dividend(h: Holding, div_map: dict[str, float]) -> float:
@@ -33,9 +55,13 @@ def annual_dividend(h: Holding, div_map: dict[str, float]) -> float:
 
 
 def holding_dividend(h: Holding, div_map: dict[str, float], pre_tax: bool = True) -> float:
-    """銘柄の年間配当。pre_tax=False で税抜（market 別税率）。"""
+    """銘柄の年間配当。pre_tax=False で税抜（market と口座区分に応じた税率）。
+
+    集計系（total_annual_dividend・dividend_by_month・dividend_by_sector 等）はすべて
+    この関数を通るため、ここで口座区分を見れば全体が正しくなる。
+    """
     gross = annual_dividend(h, div_map)
-    return gross if pre_tax else after_tax(gross, h.market)
+    return gross if pre_tax else after_tax(gross, h.market, h.account)
 
 
 def total_annual_dividend(
@@ -43,6 +69,19 @@ def total_annual_dividend(
 ) -> float:
     """総年間配当。pre_tax=False で税抜。"""
     return sum(holding_dividend(h, div_map, pre_tax) for h in holdings)
+
+
+def effective_tax_rate(holdings: list[Holding], div_map: dict[str, float]) -> float:
+    """いまの保有構成での配当の実効税率（0.0〜1.0）。配当が無ければ国内税率。
+
+    将来の配当シミュレーションに渡す。NISA の比率が高いほど税率が下がるので、
+    一律 20.315% で見積もるより手取りが実態に近づく。
+    """
+    gross = total_annual_dividend(holdings, div_map, pre_tax=True)
+    if gross == 0:
+        return TAX_RATE["jp"]
+    net = total_annual_dividend(holdings, div_map, pre_tax=False)
+    return (gross - net) / gross
 
 
 def yield_on_cost(holdings: list[Holding], div_map: dict[str, float]) -> float:

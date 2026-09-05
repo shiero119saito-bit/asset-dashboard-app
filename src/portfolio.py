@@ -45,6 +45,9 @@ class Holding:
     market: str = "us"
     purpose: str = ""
     source: str = ""
+    # 口座区分（specific/nisa_old/nisa_tsumitate/nisa_growth）。配当の税率が変わるため、
+    # 同一銘柄でも口座別に別の Holding として持つ。表示は group_by_ticker でまとめる
+    account: str = ""
     price_asof: str = ""  # CSV保存の時価がいつ時点か（ライブ取得時は空）
 
     @property
@@ -100,6 +103,7 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
                 market=_resolve_market(row.get("market"), ticker),
                 purpose=_clean_str(row.get("purpose"), ""),
                 source=_clean_str(row.get("source"), ""),
+                account=_clean_str(row.get("account"), ""),
                 # ライブ取得できた銘柄は「現在値」なので asof は付けない
                 price_asof="" if price_map.get(ticker) else _clean_str(row.get("price_asof"), ""),
             )
@@ -220,6 +224,39 @@ def allocation_by_market_region(holdings: list[Holding]) -> dict[str, float]:
     東証上場のオルカン・S&P500 ETF/投信は jp に計上される。
     """
     return _allocation_by_key(holdings, lambda h: h.market)
+
+
+def allocation_by_account(holdings: list[Holding]) -> dict[str, float]:
+    """口座区分別の評価額構成比（%）。NISA にどれだけ入っているかを見る。
+
+    空欄は特定口座として集計する（税計算と同じ扱いに揃える）。
+    """
+    return _allocation_by_key(holdings, lambda h: h.account or "specific")
+
+
+def group_by_ticker(holdings: list[Holding]) -> dict[str, list[Holding]]:
+    """同一銘柄の保有を口座をまたいでまとめる（表示用）。
+
+    税率が口座で変わるため、計算は口座別の Holding 単位で行う必要がある。
+    一方、画面で同じ銘柄が何行にも分かれて出ると読みにくいので、表示のときだけまとめる。
+    出現順を保つ（並べ替えは呼び出し側の責務）。
+    """
+    groups: dict[str, list[Holding]] = {}
+    for h in holdings:
+        groups.setdefault(h.ticker, []).append(h)
+    return groups
+
+
+def merged_cost_per_share(group: list[Holding]) -> float:
+    """口座をまたいだ取得単価（加重平均）。株数0なら0。
+
+    単価の単純平均ではなく取得額の合計を株数の合計で割る。口座ごとに取得時期が違えば
+    単価も違うため、単純平均だと少数株の口座が過大に効いてしまう。
+    """
+    shares = sum(h.shares for h in group)
+    if shares == 0:
+        return 0.0
+    return sum(h.cost_value for h in group) / shares
 
 
 def jp_dividend_by_purpose(holdings: list[Holding]) -> dict[str, list[Holding]]:

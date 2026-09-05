@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from dividend import after_tax
+from dividend import TAX_RATE
 
 # --- 入力欄の初期値（推奨値ではない。すべてUIで変更できる） ---
 DEFAULT_ANNUAL_RETURN = 5.0  # 年率リターン想定（%）
@@ -99,6 +99,7 @@ def project_dividend_cf(
     dividend_growth: float,
     income_ratio: float,
     tax_market: str = "jp",
+    tax_rate: float | None = None,
 ) -> list[DividendPoint]:
     """配当キャッシュフローの将来推移を年次で返す。
 
@@ -108,8 +109,11 @@ def project_dividend_cf(
       買い付けた分がその年から dividend_yield% の配当を生む
     - 買い付け済みの分も翌年以降は増配率で成長する
 
-    税抜は tax_market の税率で一律換算する（日米混在の厳密配分はしない保守表示）。
+    税抜は tax_rate（実効税率）で換算する。未指定なら tax_market の税率を使う。
+    保有の口座構成から実効税率を渡すと、NISA 分が非課税になっている実態を反映できる
+    （一律 20.315% だと手取りを過小に見積もる）。
     """
+    rate = tax_rate if tax_rate is not None else TAX_RATE.get(tax_market, TAX_RATE["jp"])
     growth = dividend_growth / 100.0
     yield_rate = dividend_yield / 100.0
     annual_income_contribution = monthly * MONTHS_PER_YEAR * income_ratio
@@ -118,7 +122,7 @@ def project_dividend_cf(
         DividendPoint(
             year=0,
             annual_pre_tax=current_annual_dividend,
-            annual_after_tax=after_tax(current_annual_dividend, tax_market),
+            annual_after_tax=current_annual_dividend * (1.0 - rate),
         )
     ]
 
@@ -130,7 +134,7 @@ def project_dividend_cf(
             DividendPoint(
                 year=y,
                 annual_pre_tax=annual,
-                annual_after_tax=after_tax(annual, tax_market),
+                annual_after_tax=annual * (1.0 - rate),
             )
         )
     return points

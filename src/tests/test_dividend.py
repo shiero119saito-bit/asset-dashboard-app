@@ -94,3 +94,80 @@ def test_empty_and_missing_div_safe():
         {},
     )
     assert dv.total_annual_dividend(h, {}) == 0
+
+
+# --- 口座区分による非課税（NISA）---
+
+
+def _holding(market: str, account: str, shares: float = 100.0) -> pf.Holding:
+    return pf.Holding(
+        ticker="T", name="テスト", asset_class="jp_dividend", shares=shares,
+        cost_per_share=100.0, price=100.0, market=market, account=account,
+    )
+
+
+def test_nisa_domestic_dividend_is_untaxed():
+    assert dv.after_tax(1000.0, "jp", "nisa_growth") == 1000.0
+    assert dv.after_tax(1000.0, "jp", "nisa_tsumitate") == 1000.0
+    assert dv.after_tax(1000.0, "jp", "nisa_old") == 1000.0
+
+
+def test_nisa_us_dividend_still_pays_10_percent_withholding():
+    """NISA でも米国株の配当は現地で10%源泉徴収される。
+
+    「特定以外は非課税」を額面どおり0%にすると手取りを過大表示する。NISA では
+    外国税額控除も使えないため、この10%は取り戻せない。
+    """
+    assert dv.after_tax(1000.0, "us", "nisa_growth") == pytest.approx(900.0)
+    # 特定口座なら米10%＋国内20.315%の合算
+    assert dv.after_tax(1000.0, "us", "specific") == pytest.approx(1000.0 * (1 - 0.282835))
+
+
+def test_specific_and_blank_account_are_taxed():
+    # 空欄は特定口座扱い（未設定のデータを非課税と誤判定しない＝安全側）
+    assert dv.after_tax(1000.0, "jp", "specific") == pytest.approx(1000.0 * (1 - 0.20315))
+    assert dv.after_tax(1000.0, "jp", "") == pytest.approx(1000.0 * (1 - 0.20315))
+    assert dv.after_tax(1000.0, "jp") == pytest.approx(1000.0 * (1 - 0.20315))
+    assert dv.is_taxable("") and dv.is_taxable("specific")
+    assert not dv.is_taxable("nisa_old")
+
+
+def test_unknown_account_is_treated_as_taxable():
+    # 表記ゆれや手入力ミスで未知の値が入っても非課税にはしない
+    assert dv.is_taxable("なにか") is False or dv.after_tax(100.0, "jp", "なにか") < 100.0
+
+
+def test_holding_dividend_uses_account_of_each_holding():
+    div = {"T": 10.0}
+    taxed = dv.holding_dividend(_holding("jp", "specific"), div, pre_tax=False)
+    untaxed = dv.holding_dividend(_holding("jp", "nisa_growth"), div, pre_tax=False)
+    assert untaxed > taxed
+    assert untaxed == pytest.approx(1000.0)
+
+
+def test_total_dividend_mixes_taxable_and_untaxed_accounts():
+    """集計は holding_dividend を通るので、口座別の税率が自動的に効く。"""
+    div = {"T": 10.0}
+    mixed = [_holding("jp", "specific"), _holding("jp", "nisa_growth")]
+    total = dv.total_annual_dividend(mixed, div, pre_tax=False)
+    assert total == pytest.approx(1000.0 * (1 - 0.20315) + 1000.0)
+
+
+# --- 実効税率（シミュレーションへ渡す）---
+
+
+def test_effective_tax_rate_reflects_account_mix():
+    div = {"T": 10.0}
+    all_taxed = [_holding("jp", "specific")]
+    half = [_holding("jp", "specific"), _holding("jp", "nisa_growth")]
+    all_nisa = [_holding("jp", "nisa_growth")]
+
+    assert dv.effective_tax_rate(all_taxed, div) == pytest.approx(0.20315)
+    assert dv.effective_tax_rate(half, div) == pytest.approx(0.20315 / 2)
+    assert dv.effective_tax_rate(all_nisa, div) == 0.0
+
+
+def test_effective_tax_rate_without_dividend_falls_back_to_domestic_rate():
+    # 配当0だと 0/0 になる。将来の見積もりに使うため国内税率を返す
+    assert dv.effective_tax_rate([_holding("jp", "nisa_growth")], {}) == pytest.approx(0.20315)
+    assert dv.effective_tax_rate([], {}) == pytest.approx(0.20315)

@@ -158,3 +158,49 @@ def test_jp_dividend_by_purpose_groups_and_ignores_other_classes():
     assert [h.ticker for h in groups[""]] == ["1003"]
     # index クラスは jp_dividend でないため除外される
     assert all(h.ticker != "2559" for group in groups.values() for h in group)
+
+
+# --- 口座区分（表示用の合算）---
+
+
+def _acc_holding(ticker: str, account: str, shares: float, cost: float) -> pf.Holding:
+    return pf.Holding(
+        ticker=ticker, name=ticker, asset_class="jp_dividend", shares=shares,
+        cost_per_share=cost, price=cost, market="jp", account=account,
+    )
+
+
+def test_group_by_ticker_merges_accounts_for_display():
+    """計算は口座別、表示は銘柄別。同じ銘柄が何行にも分かれて見えないようにする。"""
+    holdings = [
+        _acc_holding("1605", "specific", 10, 100),
+        _acc_holding("1605", "nisa_growth", 5, 200),
+        _acc_holding("2003", "specific", 1, 300),
+    ]
+    groups = pf.group_by_ticker(holdings)
+    assert list(groups) == ["1605", "2003"]  # 出現順を保つ
+    assert len(groups["1605"]) == 2
+    assert sum(h.shares for h in groups["1605"]) == 15
+
+
+def test_merged_cost_per_share_is_weighted_by_shares():
+    """単純平均だと少数株の口座が過大に効く。取得額合計 ÷ 株数合計で出す。"""
+    group = [_acc_holding("1605", "specific", 10, 100), _acc_holding("1605", "nisa_growth", 90, 200)]
+    # 単純平均なら150。加重平均は (10*100 + 90*200) / 100 = 190
+    assert pf.merged_cost_per_share(group) == 190.0
+
+
+def test_merged_cost_per_share_zero_shares():
+    assert pf.merged_cost_per_share([]) == 0.0
+    assert pf.merged_cost_per_share([_acc_holding("X", "specific", 0, 100)]) == 0.0
+
+
+def test_allocation_by_account_treats_blank_as_specific():
+    # 空欄は特定口座に集計する（税計算の扱いと揃える）
+    holdings = [
+        _acc_holding("A", "", 1, 100),
+        _acc_holding("B", "specific", 1, 100),
+        _acc_holding("C", "nisa_growth", 2, 100),
+    ]
+    alloc = pf.allocation_by_account(holdings)
+    assert alloc == {"specific": 50.0, "nisa_growth": 50.0}

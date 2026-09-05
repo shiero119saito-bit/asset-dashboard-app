@@ -35,6 +35,16 @@ PURPOSE_LABELS = {**PURPOSE_LABELS_BY_VALUE, "": "未分類"}
 SOURCE_LABELS = {"rakuten": "楽天", "sbi": "SBI", "": "手入力"}
 MARKET_LABELS = {"jp": "日本株", "us": "米国株"}
 
+# 口座区分。特定以外は配当の国内課税が非課税になる（米国株の源泉10%は残る）。
+# 空欄は特定扱い＝課税（未設定のデータを非課税と誤表示しないための安全側）
+ACCOUNT_LABELS = {
+    "specific": "特定",
+    "nisa_old": "旧NISA",
+    "nisa_tsumitate": "つみたて投資枠",
+    "nisa_growth": "成長投資枠",
+    "": "特定",
+}
+
 # バックテスト用の資産クラス代表銘柄（保有銘柄すべての履歴取得は重いため代替する）
 # インデックス枠以外は固定。米国上場銘柄を優先するのは、yfinance が日本ETFの
 # 株式分割を調整せず履歴が壊れるため（2559 で実害。design-decisions 2026-09-02）。
@@ -262,6 +272,58 @@ def show_table(
     )
 
 
+def _summarize(group: list[pf.Holding], label_of) -> str:
+    """グループ内の値の内訳を1セルに収める（例「特定・成長投資枠」）。重複は畳む。"""
+    return "・".join(dict.fromkeys(label_of(h) for h in group))
+
+
+def _account_summary(group: list[pf.Holding]) -> str:
+    """口座区分の内訳。空欄は特定として表示する（税計算の扱いと揃える）。"""
+    return _summarize(group, lambda h: ACCOUNT_LABELS.get(h.account, h.account or "特定"))
+
+
+def _merged_row(
+    group: list[pf.Holding],
+    total_market: float,
+    price_map: dict[str, float],
+    div_map: dict[str, float],
+    pre_tax: bool,
+    tax_mode: str,
+) -> dict:
+    """同一銘柄の保有（口座別に分かれている）を1行にまとめる。
+
+    **配当だけは合算前に口座別へ税率を当てる**必要がある（NISA は非課税）。
+    株数や評価額は単純合計でよいが、取得単価は加重平均にする。
+    """
+    head = group[0]
+    shares = sum(h.shares for h in group)
+    cost = sum(h.cost_value for h in group)
+    value = sum(h.market_value for h in group)
+    gain = value - cost
+    return {
+        "銘柄": head.ticker,
+        "名称": head.name,
+        "クラス": pf.ASSET_CLASS_LABELS[head.asset_class],
+        "セクター": head.sector,
+        "市場": MARKET_LABELS.get(head.market, head.market),
+        "用途": PURPOSE_LABELS.get(head.purpose, "未分類"),
+        "口座": _account_summary(group),
+        # 同じ銘柄を複数の証券会社で持つことがあるので、先頭だけでなく内訳を出す
+        "証券会社": _summarize(group, lambda h: SOURCE_LABELS.get(h.source, h.source or "手入力")),
+        "株数": shares,
+        "取得単価": pf.merged_cost_per_share(group),
+        "現在値": round(head.price, 2),
+        "時価": head.price_asof or ("ライブ" if price_map.get(head.ticker) else "取得単価"),
+        "評価額": round(value),
+        "含み損益": round(gain),
+        "損益率%": round(gain / cost * 100, 2) if cost else 0.0,
+        "構成比%": round(value / total_market * 100, 1) if total_market else 0.0,
+        f"年間配当({tax_mode})": round(
+            sum(dv.holding_dividend(h, div_map, pre_tax) for h in group)
+        ),
+    }
+
+
 def _render_price_refresh(cfg: sg.StorageConfig | None) -> None:
     """時価の更新導線。保存先があれば GitHub Actions に依頼するボタンを出す。
 
@@ -411,6 +473,10 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
                 help="保有目的。dividend=配当収入 / growth=資産形成（インデックス）/ yutai=優待",
             ),
             "source": st.column_config.TextColumn("証券会社"),
+            "account": st.column_config.SelectboxColumn(
+                "口座", options=list(dataio.ACCOUNTS),
+                help="特定以外は配当の国内課税が非課税。空欄は特定として扱う（課税＝安全側）",
+            ),
             "price": st.column_config.NumberColumn("保存時価", min_value=0.0, format="%,.2f"),
             "price_asof": st.column_config.TextColumn("時価の日付"),
             # 投資信託の基準価額取得に使う。上場銘柄では空欄のままでよい
@@ -519,9 +585,14 @@ def _render_accumulation_tab(current_value: float, years: int) -> None:
 
 
 def _render_dividend_cf_tab(
-    current_annual_dividend: float, current_yield: float, years: int, target_age: int
+    current_annual_dividend: float, current_yield: float, years: int, target_age: int,
+    tax_rate: float,
 ) -> None:
-    """配当CFタブ：目標（月6〜10万）への到達見込み。"""
+    """配当CFタブ：目標（月6〜10万）への到達見込み。
+
+    tax_rate はいまの保有の口座構成から出した実効税率。一律 20.315% で見積もると、
+    NISA 分が非課税である実態を反映できず手取りを過小評価する。
+    """
     c1, c2, c3 = st.columns(3)
     monthly = c1.number_input(
         "毎月の積立額", value=sm.DEFAULT_MONTHLY_CONTRIBUTION, step=10_000.0,
@@ -547,6 +618,10 @@ def _render_dividend_cf_tab(
         help="生活費に充てられる額で見るため既定は税抜",
     )
     pre_tax = tax_mode == "税込"
+    st.caption(
+        f"税抜は現在の口座構成から算出した実効税率 {tax_rate * 100:.2f}% で換算している"
+        "（NISA比率が上がるほど下がる）。将来の口座構成の変化は織り込まない。"
+    )
 
     points = sm.project_dividend_cf(
         current_annual_dividend=current_annual_dividend,
@@ -555,6 +630,7 @@ def _render_dividend_cf_tab(
         dividend_yield=dividend_yield,
         dividend_growth=dividend_growth,
         income_ratio=income_ratio / 100.0,
+        tax_rate=tax_rate,
     )
     last = points[-1]
     last_monthly = last.monthly_pre_tax if pre_tax else last.monthly_after_tax
@@ -790,7 +866,8 @@ def main() -> None:
     # market 列は上場市場（投資対象地域ではない）。
     st.subheader("アセットアロケーション")
     axis = st.radio(
-        "集計軸", ["資産クラス", "商品種別", "上場市場"], horizontal=True, key="alloc_axis"
+        "集計軸", ["資産クラス", "商品種別", "上場市場", "口座区分"],
+        horizontal=True, key="alloc_axis",
     )
     left, right = st.columns([1, 1])
 
@@ -820,6 +897,14 @@ def main() -> None:
             axis, pf.allocation_by_sector(holdings), {}, left, right, cfg
         )
         st.caption("holdings.csv の sector 列。業種（電気機器・銀行 等）ではなく商品種別。")
+    elif axis == "口座区分":
+        _render_simple_allocation(
+            axis, pf.allocation_by_account(holdings), ACCOUNT_LABELS, left, right, cfg
+        )
+        st.caption(
+            "特定以外は配当の国内課税（20.315%）が非課税。"
+            "ただし米国株はNISAでも現地で10%が源泉徴収される（外国税額控除が使えず取り戻せない）。"
+        )
     else:
         _render_simple_allocation(
             axis, pf.allocation_by_market_region(holdings), MARKET_LABELS, left, right, cfg
@@ -869,25 +954,8 @@ def main() -> None:
     st.subheader("銘柄別")
     table = pd.DataFrame(
         [
-            {
-                "銘柄": h.ticker,
-                "名称": h.name,
-                "クラス": pf.ASSET_CLASS_LABELS[h.asset_class],
-                "セクター": h.sector,
-                "市場": MARKET_LABELS.get(h.market, h.market),
-                "用途": PURPOSE_LABELS.get(h.purpose, "未分類"),
-                "証券会社": SOURCE_LABELS.get(h.source, h.source or "手入力"),
-                "株数": h.shares,
-                "取得単価": h.cost_per_share,
-                "現在値": round(h.price, 2),
-                "時価": h.price_asof or ("ライブ" if price_map.get(h.ticker) else "取得単価"),
-                "評価額": round(h.market_value),
-                "含み損益": round(h.gain),
-                "損益率%": round(h.gain_rate, 2),
-                "構成比%": round(h.market_value / market * 100, 1) if market else 0.0,
-                f"年間配当({tax_mode})": round(dv.holding_dividend(h, div_map, pre_tax)),
-            }
-            for h in holdings
+            _merged_row(group, market, price_map, div_map, pre_tax, tax_mode)
+            for group in pf.group_by_ticker(holdings).values()
         ]
     )
     show_table(table, decimals={"損益率%": 2, "構成比%": 1},
@@ -903,17 +971,19 @@ def main() -> None:
             if not group:
                 st.caption("該当なし")
                 continue
+            # 銘柄別テーブルと同じく、口座で分かれた保有は1行にまとめて見せる
             purpose_df = pd.DataFrame(
                 [
                     {
-                        "銘柄": h.ticker,
-                        "名称": h.name,
-                        "株数": h.shares,
-                        "取得単価": h.cost_per_share,
-                        "評価額": round(h.market_value),
-                        "含み損益": round(h.gain),
+                        "銘柄": rows_of[0].ticker,
+                        "名称": rows_of[0].name,
+                        "口座": _account_summary(rows_of),
+                        "株数": sum(h.shares for h in rows_of),
+                        "取得単価": pf.merged_cost_per_share(rows_of),
+                        "評価額": round(sum(h.market_value for h in rows_of)),
+                        "含み損益": round(sum(h.gain for h in rows_of)),
                     }
-                    for h in group
+                    for rows_of in pf.group_by_ticker(group).values()
                 ]
             )
             show_table(purpose_df, order_key=f"cols_purpose_{key or 'none'}", cfg=cfg)
@@ -944,6 +1014,7 @@ def main() -> None:
             current_yield=dv.yield_on_market(holdings, div_map),
             years=years,
             target_age=int(target_age),
+            tax_rate=dv.effective_tax_rate(holdings, div_map),
         )
     with tab_bt:
         _render_backtest_tab()

@@ -289,3 +289,47 @@ def test_no_save_button_without_storage(monkeypatch):
     # 保存先が無いときは出さない（押しても保存できないボタンを見せない）
     st = _run_main(monkeypatch, use_live=False)
     assert "この並びを保存" not in st.button_log
+
+
+def test_main_runs_with_every_allocation_axis(monkeypatch):
+    """集計軸をどれに切り替えても main() が通ること（口座区分の軸を含む）。
+
+    既定のスタブは options[0]（＝資産クラス）しか返さないため、後から足した軸は
+    一度も実行されないまま緑になる。軸ごとに描画の分岐が違うので通しておく。
+    """
+    for index in (0, 1, 2, 3):
+        st = _install_streamlit_stub(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
+        base_radio = st.radio
+        st.radio = (
+            lambda label, options, _i=index, **kw:
+            options[min(_i, len(options) - 1)] if label == "集計軸" else base_radio(label, options, **kw)
+        )
+        for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+            sys.modules.pop(mod, None)
+        import prices as pr
+        import storage as sg
+        monkeypatch.setattr(pr, "fetch_prices", lambda tickers: {})
+        monkeypatch.setattr(pr, "fetch_dividends", lambda tickers: {})
+        monkeypatch.setattr(pr, "fetch_dividend_months", lambda tickers: {})
+        monkeypatch.setattr(pr, "fetch_fx_rate", lambda: None)
+        monkeypatch.setattr(sg, "load", lambda cfg: (None, None))
+        import app
+        monkeypatch.setattr(app, "save_birth_date", lambda birth, cfg=None: (True, "保存した"))
+        app.main()
+
+
+def test_account_labels_cover_all_stored_values(monkeypatch):
+    """画面の表示名が保存されうる値をすべて網羅していること。
+
+    欠けると内部値（nisa_growth 等）がそのまま画面に出る。
+    """
+    _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "dataio"):
+        sys.modules.pop(mod, None)
+    import dataio
+    import app
+
+    for value in dataio.ACCOUNTS:
+        assert value in app.ACCOUNT_LABELS
+    assert app.ACCOUNT_LABELS[""] == "特定"  # 空欄は特定扱い（税計算と揃える）
+    assert app.ACCOUNT_LABELS["nisa_growth"] == "成長投資枠"

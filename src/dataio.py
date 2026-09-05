@@ -30,6 +30,8 @@ HOLDINGS_COLUMNS = (
     "div_per_share",
     "purpose",
     "source",
+    # 口座区分。税率が変わる（NISA は国内課税が非課税）ため、同一銘柄でも口座別に行を分ける
+    "account",
     "price",
     "price_asof",
     # 投資信託の基準価額取得用（投資信託協会のCSVはこの2つでファンドが特定される）。
@@ -89,11 +91,60 @@ def _cell(value) -> str:
 
 
 # --- 取込データのマージ（証券会社CSV取込・画面アップロードの両方で使う）---
-# 同一銘柄を複数の証券会社で保有しうるため、キーは ticker 単体ではなく (ticker, source)。
-# 既存の分類済みメタ（asset_class/sector/market/purpose/div_per_share）は上書きせず、
-# 数量・取得単価・名称だけを最新値で更新する。
+# 同一銘柄を複数の証券会社・複数の口座区分で保有しうるため、キーは
+# (ticker, source, account)。既存の分類済みメタは上書きせず、数量・取得単価・名称だけを
+# 最新値で更新する。
 
 REIT_NAME_MARKERS = ("ＲＥＩＴ", "REIT", "リート")
+
+# 口座区分。空欄は特定口座として扱う（課税＝安全側。手入力データが未設定でも損しない）
+ACCOUNT_SPECIFIC = "specific"
+ACCOUNT_NISA_OLD = "nisa_old"
+ACCOUNT_NISA_TSUMITATE = "nisa_tsumitate"
+ACCOUNT_NISA_GROWTH = "nisa_growth"
+ACCOUNTS = (ACCOUNT_SPECIFIC, ACCOUNT_NISA_OLD, ACCOUNT_NISA_TSUMITATE, ACCOUNT_NISA_GROWTH)
+
+# 再取込で行が口座別に分割されたとき、分割前の行から引き継ぐ分類情報。
+# これが無いと purpose や isin（投信の基準価額取得に必要）が分割の瞬間に消える
+META_COLUMNS = (
+    "asset_class", "sector", "market", "div_per_share", "purpose", "isin", "assoc_fund_cd",
+)
+
+
+def account_from_label(label: str) -> str:
+    """証券会社CSVの口座区分表記を内部値へ変換する。
+
+    表記は証券会社・レポート・年度で揺れる（「NISA成長投資枠」「つみたてNISA」
+    「特定口座」「特定」等）ため、含まれる語で判定する。判別できないものは特定口座
+    ＝課税扱いにする（非課税と誤判定して手取りを過大表示しないため）。
+
+    **新旧の区別は「投資枠」という語で行う**。新NISA（2024〜）は「つみたて投資枠」
+    「成長投資枠」と呼び、旧制度は「つみたてNISA」「一般NISA」と呼ぶ。
+    「つみたて」の有無だけで判定すると、旧制度の「つみたてNISA」が新しい積立枠に
+    混ざってしまう（非課税である点は同じだが、Shiero は新旧を分けて見たい）。
+    """
+    s = str(label or "").strip()
+    if not s:
+        return ACCOUNT_SPECIFIC
+    if "投資枠" in s:  # 新NISA
+        if "つみたて" in s or "積立" in s or "ツミタテ" in s:
+            return ACCOUNT_NISA_TSUMITATE
+        if "成長" in s:
+            return ACCOUNT_NISA_GROWTH
+        return ACCOUNT_NISA_OLD  # 「投資枠」だが種別不明。非課税なのは確かなのでNISA側へ
+    if "NISA" in s or "ＮＩＳＡ" in s or "ニーサ" in s:
+        return ACCOUNT_NISA_OLD  # つみたてNISA・一般NISA（旧制度）
+    return ACCOUNT_SPECIFIC
+
+
+def normalize_account(value) -> str:
+    """口座区分を正規化する。空欄・NaN は特定口座扱い。
+
+    キーの一致に使うため、空欄と "specific" を同じものとして扱う必要がある
+    （既存行が空欄で取込行が specific だと、別行として二重に増える）。
+    """
+    s = str(value or "").strip()
+    return s if s and s.lower() != "nan" else ACCOUNT_SPECIFIC
 
 
 def _default_metadata(name: str, hint: dict | None = None) -> dict:
@@ -116,39 +167,62 @@ def _default_metadata(name: str, hint: dict | None = None) -> dict:
     return meta
 
 
-def _key(ticker: str, source: str) -> tuple[str, str]:
-    return (str(ticker).strip(), str(source).strip())
+def _key(ticker: str, source: str, account) -> tuple[str, str, str]:
+    return (str(ticker).strip(), str(source).strip(), normalize_account(account))
+
+
+def _meta_fallback(existing_rows: list[dict]) -> dict[tuple[str, str], dict]:
+    """(ticker, source) → 分類済みメタ の対応表。口座別に分割された行の初期値に使う。
+
+    再取込で1行が口座別の複数行に分かれるとき、新しい行は既存キーに一致しないため
+    既定分類（新規銘柄扱い）になってしまう。分割前の行が持っていた purpose や isin を
+    引き継ぐことで、分類のやり直しを防ぐ。
+    """
+    table: dict[tuple[str, str], dict] = {}
+    for row in existing_rows:
+        key = (str(row.get("ticker", "")).strip(), str(row.get("source", "")).strip())
+        table.setdefault(key, {col: row.get(col, "") for col in META_COLUMNS})
+    return table
 
 
 def merge_holdings(existing_rows: list[dict], imported_rows: list[dict], source: str) -> list[dict]:
     """既存 holdings 行 + 証券会社CSV取込行 → マージ済み holdings 行リスト。
 
-    existing_rows: holdings.csv 由来の行（(ticker, source) をキーに分類済みメタを保持）
+    existing_rows: holdings.csv 由来の行（(ticker, source, account) をキーに分類済みメタを保持）
     imported_rows: importers.rakuten/sbi の parse_*_csv が返す
-                    {"ticker", "name", "shares", "cost_per_share"} のリスト
-    source: 今回の取込元（例 "rakuten"/"sbi"）。同一 (ticker, source) のみ更新対象にする。
+                    {"ticker", "name", "shares", "cost_per_share"}（+ 任意で "account"）のリスト
+    source: 今回の取込元（例 "rakuten"/"sbi"）。同一 (ticker, source, account) のみ更新対象。
     """
-    by_key: dict[tuple[str, str], dict] = {
-        _key(row.get("ticker"), row.get("source", "")): dict(row) for row in existing_rows
+    by_key: dict[tuple[str, str, str], dict] = {
+        _key(row.get("ticker"), row.get("source", ""), row.get("account")): dict(row)
+        for row in existing_rows
     }
+    meta_fallback = _meta_fallback(existing_rows)
 
     for imported in imported_rows:
         ticker = str(imported["ticker"]).strip()
-        k = _key(ticker, source)
+        account = normalize_account(imported.get("account"))
+        k = _key(ticker, source, account)
         if k in by_key:
             merged = by_key[k]
             merged["name"] = imported["name"]
             merged["shares"] = imported["shares"]
             merged["cost_per_share"] = imported["cost_per_share"]
         else:
+            # 同じ銘柄が別口座に既にあればその分類を引き継ぐ。無ければ新規銘柄の既定分類
+            meta = meta_fallback.get((ticker, source)) or _default_metadata(
+                imported["name"], imported
+            )
             merged = {
                 "ticker": ticker,
                 "name": imported["name"],
                 "shares": imported["shares"],
                 "cost_per_share": imported["cost_per_share"],
                 "source": source,
-                **_default_metadata(imported["name"], imported),
+                "account": account,
+                **meta,
             }
+        merged["account"] = account
         by_key[k] = merged
 
     return [
