@@ -37,14 +37,24 @@ class StorageConfig:
         return f"{API_ROOT}/repos/{self.owner}/{self.repo}/contents/{self.path}"
 
 
+def _clean(value) -> str:
+    """設定値から空白・改行を除去する。
+
+    Secrets へ貼り付ける際にトークンが折り返されて改行が混ざることがある。
+    そのまま HTTP ヘッダに入れると requests が InvalidHeader を投げ、
+    「接続できない」ようにしか見えない失敗になるため、ここで落とす。
+    """
+    return "".join(str(value).split())
+
+
 def build_config(raw: dict | None) -> StorageConfig | None:
     """secrets の dict から設定を組み立てる。必須項目が欠ければ None（＝未設定）。"""
     if not raw:
         return None
     try:
-        token = str(raw["token"]).strip()
-        owner = str(raw["owner"]).strip()
-        repo = str(raw["repo"]).strip()
+        token = _clean(raw["token"])
+        owner = _clean(raw["owner"])
+        repo = _clean(raw["repo"])
     except (KeyError, TypeError):
         return None
     if not (token and owner and repo):
@@ -53,8 +63,8 @@ def build_config(raw: dict | None) -> StorageConfig | None:
         token=token,
         owner=owner,
         repo=repo,
-        path=str(raw.get("path") or "holdings.csv").strip(),
-        branch=str(raw.get("branch") or "main").strip(),
+        path=_clean(raw.get("path") or "holdings.csv"),
+        branch=_clean(raw.get("branch") or "main"),
     )
 
 
@@ -64,6 +74,37 @@ def _headers(cfg: StorageConfig) -> dict[str, str]:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def check(cfg: StorageConfig | None) -> tuple[bool, str]:
+    """保存先へ到達できるか確かめる（読み取りのみ）。設定直後の切り分け用。
+
+    ファイルが未作成（404）でも「repo には届いている」ことが分かるよう区別して返す。
+    """
+    if cfg is None:
+        return (False, "保存先が設定されていません。")
+    try:
+        import requests
+    except ImportError:
+        return (False, "requests が導入されていません。")
+    try:
+        res = requests.get(
+            cfg.contents_url, headers=_headers(cfg),
+            params={"ref": cfg.branch}, timeout=TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        return (False, f"接続できません（{type(e).__name__}）。")
+
+    if res.status_code == 200:
+        return (True, "保存先に接続でき、ファイルもあります。")
+    if res.status_code == 404:
+        # repo が無い場合も 404 なので、両方を疑えるよう書く
+        return (True, "保存先に接続できました（ファイルは未作成。保存すると作られます）。"
+                      "※ repo 名が違う場合も同じ表示になります。")
+    if res.status_code in (401, 403):
+        return (False, "認証に失敗しました。トークンの権限（Contents: Read and write）と"
+                       "対象リポジトリの指定を確認してください。")
+    return (False, f"接続に失敗しました（HTTP {res.status_code}）。")
 
 
 def load(cfg: StorageConfig | None) -> tuple[str | None, str | None]:
@@ -122,8 +163,11 @@ def save(
         res = requests.put(
             cfg.contents_url, headers=_headers(cfg), json=body, timeout=TIMEOUT_SECONDS
         )
-    except Exception:
-        return (False, "保存先に接続できませんでした。")
+    except Exception as e:
+        # 例外の型だけ添える。トークンは Authorization ヘッダにあり例外文には出ないが、
+        # 念のため型名以外は載せない。原因の切り分けにはこれで足りる
+        # （InvalidHeader＝トークンに不正文字／ConnectionError＝到達不可 等）。
+        return (False, f"保存先に接続できませんでした（{type(e).__name__}）。")
 
     if res.status_code in (200, 201):
         return (True, "保存しました。")

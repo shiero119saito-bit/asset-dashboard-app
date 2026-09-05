@@ -258,7 +258,10 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
             st.rerun()
         else:
             st.error(message)
-    right.caption(f"保存先：{cfg.owner}/{cfg.repo}/{cfg.path}")
+    right.caption(f"保存先：{cfg.owner}/{cfg.repo}/{cfg.path}（{cfg.branch}）")
+    if right.button("保存先への接続を確認", key="check_storage"):
+        ok, message = sg.check(cfg)
+        (right.success if ok else right.error)(message)
 
 
 def _render_birth_date_input() -> date | None:

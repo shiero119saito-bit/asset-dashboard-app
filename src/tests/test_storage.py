@@ -152,3 +152,44 @@ def test_save_never_leaks_token_in_message(monkeypatch):
         _install(monkeypatch, _RequestsStub(put_result=_Response(status)))
         _, msg = sg.save(CFG, "x", None, "m")
         assert "t0ken" not in msg
+
+
+# --- 設定値の正規化・接続確認 ---
+
+
+def test_build_config_strips_whitespace_and_newlines():
+    """貼り付け事故（改行混入）で HTTP ヘッダが壊れないこと。
+
+    改行入りのトークンをそのままヘッダに入れると requests が InvalidHeader を投げ、
+    「接続できない」ようにしか見えない失敗になる（実際に踏んだ）。
+    """
+    cfg = sg.build_config({
+        "token": "github_pat_\nabc  def\r\n", "owner": " me \n", "repo": "\tdata ",
+    })
+    assert cfg.token == "github_pat_abcdef"
+    assert cfg.owner == "me" and cfg.repo == "data"
+
+
+def test_save_error_message_names_exception_type(monkeypatch):
+    # 原因の切り分けができるよう例外の型を添える（トークンは載せない）
+    _install(monkeypatch, _RequestsStub(put_result=ConnectionError("boom")))
+    ok, msg = sg.save(CFG, "x", None, "m")
+    assert ok is False
+    assert "ConnectionError" in msg and "t0ken" not in msg
+
+
+def test_check_distinguishes_states(monkeypatch):
+    _install(monkeypatch, _RequestsStub(get_result=_Response(200, {"content": "", "sha": "s"})))
+    assert sg.check(CFG)[0] is True
+
+    # ファイル未作成（初回）は「到達できている」扱い
+    _install(monkeypatch, _RequestsStub(get_result=_Response(404)))
+    ok, msg = sg.check(CFG)
+    assert ok is True and "未作成" in msg
+
+    # 認証エラーは失敗＝何を直すべきか書く
+    _install(monkeypatch, _RequestsStub(get_result=_Response(401)))
+    ok, msg = sg.check(CFG)
+    assert ok is False and "トークン" in msg
+
+    assert sg.check(None)[0] is False
