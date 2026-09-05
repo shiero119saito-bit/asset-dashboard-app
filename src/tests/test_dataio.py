@@ -237,3 +237,40 @@ def test_account_column_is_in_canonical_order():
     assert dataio.normalize_account(None) == "specific"
     assert dataio.normalize_account("nan") == "specific"
     assert dataio.normalize_account(" nisa_old ") == "nisa_old"
+
+
+def test_replace_source_rebuilds_only_that_broker():
+    """全保有レポートの取込では、その証券会社の行を作り直す（二重計上を防ぐ）。
+
+    口座区分を持つ前のデータは全て specific で入っている。再取込すると NISA 側が
+    新しいキーとして**追加**され、同じ保有が二重に載る（実際に楽天の評価額が2倍になった）。
+    CSVが全保有を含むなら、載っていない組み合わせはもう保有していない。
+    """
+    existing = [
+        {"ticker": "1605", "name": "INPEX", "asset_class": "jp_dividend", "shares": "10",
+         "cost_per_share": "1500", "sector": "個別株", "market": "jp", "purpose": "dividend",
+         "source": "rakuten", "account": "specific"},
+        {"ticker": "9999", "name": "他社保有", "asset_class": "jp_dividend", "shares": "5",
+         "cost_per_share": "100", "source": "sbi", "account": "specific"},
+    ]
+    imported = [{"ticker": "1605", "name": "INPEX", "shares": 10.0, "cost_per_share": 1500.0,
+                 "account": "nisa_growth"}]
+
+    merged = dataio.merge_holdings(existing, imported, source="rakuten", replace_source=True)
+
+    rakuten_rows = [r for r in merged if r["source"] == "rakuten"]
+    assert len(rakuten_rows) == 1                      # specific の古い行は消える
+    assert rakuten_rows[0]["account"] == "nisa_growth"
+    assert rakuten_rows[0]["purpose"] == "dividend"    # 分類は引き継ぐ
+    assert any(r["source"] == "sbi" for r in merged)   # 他社の保有は残す
+
+
+def test_replace_source_defaults_to_off():
+    """既定は従来どおり差分マージ。一部しか含まないレポートで消してはいけない。"""
+    existing = [
+        {"ticker": "1605", "name": "INPEX", "asset_class": "jp_dividend", "shares": "10",
+         "cost_per_share": "1500", "source": "rakuten", "account": "specific"},
+    ]
+    imported = [{"ticker": "2003", "name": "別銘柄", "shares": 1.0, "cost_per_share": 100.0}]
+    merged = dataio.merge_holdings(existing, imported, source="rakuten")
+    assert len(merged) == 2  # 既存は残る

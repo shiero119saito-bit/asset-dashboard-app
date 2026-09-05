@@ -185,19 +185,39 @@ def _meta_fallback(existing_rows: list[dict]) -> dict[tuple[str, str], dict]:
     return table
 
 
-def merge_holdings(existing_rows: list[dict], imported_rows: list[dict], source: str) -> list[dict]:
+def merge_holdings(
+    existing_rows: list[dict],
+    imported_rows: list[dict],
+    source: str,
+    replace_source: bool = False,
+) -> list[dict]:
     """既存 holdings 行 + 証券会社CSV取込行 → マージ済み holdings 行リスト。
 
     existing_rows: holdings.csv 由来の行（(ticker, source, account) をキーに分類済みメタを保持）
     imported_rows: importers.rakuten/sbi の parse_*_csv が返す
                     {"ticker", "name", "shares", "cost_per_share"}（+ 任意で "account"）のリスト
     source: 今回の取込元（例 "rakuten"/"sbi"）。同一 (ticker, source, account) のみ更新対象。
+    replace_source: **全保有を含むレポート**（楽天「資産合計」等）を取り込むときに True。
+        その source の既存行をいったん捨ててからCSVの内容で作り直す。
+
+    replace_source が要る理由：口座区分を持つ前のデータは全て specific で、再取込すると
+    同じ保有が NISA 側の新しい行として**追加**されてしまう（キーが違うため）。
+    実際に楽天の評価額が2倍になった。CSVが全保有を含むなら、載っていない
+    (ticker, account) の組み合わせはもう保有していないので、捨てるのが正しい。
+
+    一部しか含まないレポート（国内株のみ等）で True にすると他の資産が消えるので、
+    呼び出し側が明示的に指定する。
     """
+    meta_fallback = _meta_fallback(existing_rows)  # 捨てる前に分類を退避する
+    kept = (
+        [row for row in existing_rows if str(row.get("source", "")).strip() != source.strip()]
+        if replace_source
+        else existing_rows
+    )
     by_key: dict[tuple[str, str, str], dict] = {
         _key(row.get("ticker"), row.get("source", ""), row.get("account")): dict(row)
-        for row in existing_rows
+        for row in kept
     }
-    meta_fallback = _meta_fallback(existing_rows)
 
     for imported in imported_rows:
         ticker = str(imported["ticker"]).strip()
