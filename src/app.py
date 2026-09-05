@@ -325,7 +325,8 @@ def _render_price_status(
 
 
 def _render_simple_allocation(
-    axis: str, alloc: dict[str, float], label_map: dict[str, str], left, right
+    axis: str, alloc: dict[str, float], label_map: dict[str, str], left, right,
+    cfg: sg.StorageConfig | None = None,
 ) -> None:
     """目標値が未定義の軸（商品種別・上場市場）の構成比を円グラフ＋表で描く。
 
@@ -343,7 +344,7 @@ def _render_simple_allocation(
     table_df = pd.DataFrame(
         {axis: labels, "現在%": [round(v, 1) for v in alloc.values()]}
     ).sort_values("現在%", ascending=False)
-    show_table(table_df, right, order_key=f"cols_alloc_{axis}")
+    show_table(table_df, right, order_key=f"cols_alloc_{axis}", cfg=cfg)
 
 
 def _merge_uploaded(
@@ -716,6 +717,9 @@ def main() -> None:
     st.title("保有資産 見える化ダッシュボード")
 
     cfg = storage_config()
+    if VIEW_ORDERS_STATE not in st.session_state:
+        # 保存済みの列順は1セッションに1回だけ読む（再実行のたびに API を叩かない）
+        st.session_state[VIEW_ORDERS_STATE] = load_view_orders(cfg)
 
     st.sidebar.subheader("データ")
     uploaded = st.sidebar.file_uploader("保有CSVをアップロード（任意）", type="csv")
@@ -748,7 +752,7 @@ def main() -> None:
     us_tickers = {str(r["ticker"]).strip() for r in rows if str(r.get("market", "")).strip() == "us"}
     use_live = st.sidebar.checkbox("時価を yfinance から取得", value=True)
 
-    birth_date = _render_birth_date_input()
+    birth_date = _render_birth_date_input(cfg)
 
     fx_rate = cached_fx_rate() if use_live else None
     price_map = cached_prices(tuple(tickers)) if use_live else {}
@@ -810,13 +814,15 @@ def main() -> None:
                 "ズレ": [round(drift[ac], 1) for ac in pf.ASSET_CLASSES],
             }
         )
-        show_table(drift_df, right, order_key="cols_drift")
+        show_table(drift_df, right, order_key="cols_drift", cfg=cfg)
     elif axis == "商品種別":
-        _render_simple_allocation(axis, pf.allocation_by_sector(holdings), {}, left, right)
+        _render_simple_allocation(
+            axis, pf.allocation_by_sector(holdings), {}, left, right, cfg
+        )
         st.caption("holdings.csv の sector 列。業種（電気機器・銀行 等）ではなく商品種別。")
     else:
         _render_simple_allocation(
-            axis, pf.allocation_by_market_region(holdings), MARKET_LABELS, left, right
+            axis, pf.allocation_by_market_region(holdings), MARKET_LABELS, left, right, cfg
         )
         st.caption(
             "上場市場ベース。東証上場のオルカン・S&P500 ETF/投信は「日本株」に計上される"
@@ -884,7 +890,8 @@ def main() -> None:
             for h in holdings
         ]
     )
-    show_table(table, decimals={"損益率%": 2, "構成比%": 1}, order_key="cols_holdings")
+    show_table(table, decimals={"損益率%": 2, "構成比%": 1},
+               order_key="cols_holdings", cfg=cfg)
 
     # --- 日本個別株：高配当・優待 ---
     st.subheader("日本個別株：高配当・優待")
@@ -909,7 +916,7 @@ def main() -> None:
                     for h in group
                 ]
             )
-            show_table(purpose_df, order_key=f"cols_purpose_{key or 'none'}")
+            show_table(purpose_df, order_key=f"cols_purpose_{key or 'none'}", cfg=cfg)
 
     # --- 保有データの編集（普段の更新はここで完結させる） ---
     _render_holdings_editor(rows, sha, cfg)

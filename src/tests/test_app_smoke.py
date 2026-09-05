@@ -19,8 +19,10 @@ sys.path.insert(0, SRC)
 class _Stub:
     """Streamlit ウィジェットの汎用スタブ。呼び出しを受けて既定値を返す。"""
 
-    def __init__(self, values=None):
+    def __init__(self, values=None, button_log=None):
         self._values = values or {}
+        # 描画されたボタンのラベル。「出るはずのボタンが出ない」を検出するために記録する
+        self.button_log = button_log if button_log is not None else []
 
     # レイアウト系：自分自身（または複数）を返して連鎖呼び出しを成立させる
     def columns(self, spec, **kw):
@@ -62,6 +64,7 @@ class _Stub:
         return value
 
     def button(self, label, **kw):
+        self.button_log.append(label)
         return False  # 押されていない状態＝重い処理は走らせない
 
     def file_uploader(self, label, **kw):
@@ -115,7 +118,7 @@ class _StreamlitStub(_Stub):
 
     def __init__(self, use_live: bool, secrets: dict | None = None):
         super().__init__()
-        self.sidebar = _Stub()
+        self.sidebar = _Stub(button_log=self.button_log)  # ログを共有する
         self.secrets = _Secrets(secrets or {})
         self.column_config = _ColumnConfig()
         self.session_state: dict = {}  # 実物は dict ライク。get/pop がそのまま使える
@@ -173,6 +176,7 @@ def _run_main(
     # 設定ファイルを汚さない／GitHub へ書かない
     monkeypatch.setattr(app, "save_birth_date", lambda birth, cfg=None: (True, "保存した"))
     app.main()  # 例外が出なければ成功
+    return st
 
 
 @pytest.mark.parametrize("use_live", [False, True])
@@ -266,3 +270,22 @@ def test_birth_date_falls_back_to_local_file_without_storage(monkeypatch, tmp_pa
     ok, _ = app.save_birth_date(date(1983, 8, 21), None)
     assert ok and saved == {}  # storage へは書かない
     assert app.load_birth_date(None) == date(1983, 8, 21)
+
+
+def test_save_buttons_appear_when_storage_is_configured(monkeypatch):
+    """保存先が設定済みなら、各表に「この並びを保存」が出ること。
+
+    show_table への cfg 引き渡しを落とすとボタンが静かに消える（`cfg is not None and
+    st.button(...)` の短絡評価で描画自体が起きない）。実際にそれを踏み、画面を見るまで
+    気付けなかった。ラベルが描画されたかで守る。
+    """
+    st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
+    assert "この並びを保存" in st.button_log
+    assert "時価を今すぐ更新" in st.button_log  # 同じ理由で消えうる導線
+    assert "生年月日を保存" in st.button_log
+
+
+def test_no_save_button_without_storage(monkeypatch):
+    # 保存先が無いときは出さない（押しても保存できないボタンを見せない）
+    st = _run_main(monkeypatch, use_live=False)
+    assert "この並びを保存" not in st.button_log
