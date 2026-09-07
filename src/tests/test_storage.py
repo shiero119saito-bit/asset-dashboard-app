@@ -139,6 +139,14 @@ def test_save_conflict_tells_user_to_reload(monkeypatch):
     assert "他の端末" in msg
 
 
+def test_save_422_tells_user_to_reload(monkeypatch):
+    """既存ファイルに sha 無しで PUT すると GitHub は 422 を返す。番号だけでなく次の操作を示す。"""
+    _install(monkeypatch, _RequestsStub(put_result=_Response(422)))
+    ok, msg = sg.save(CFG, "x", None, "update")
+    assert ok is False
+    assert "再読み込み" in msg
+
+
 @pytest.mark.parametrize("status,keyword", [(401, "権限"), (403, "権限"), (404, "見つかりません")])
 def test_save_error_messages_are_actionable(monkeypatch, status, keyword):
     _install(monkeypatch, _RequestsStub(put_result=_Response(status)))

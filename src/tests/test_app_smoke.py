@@ -318,6 +318,49 @@ def test_main_runs_with_every_allocation_axis(monkeypatch):
         app.main()
 
 
+def test_uploaded_csv_keeps_storage_sha_for_replace_save(monkeypatch):
+    """「置換」で取り込んだCSVを保存するとき、保存先の sha を引き継ぐこと。
+
+    sha が None のまま PUT すると GitHub は既存ファイルへの上書きを **422** で弾く
+    （実害：置換モードで保存できなかった）。表示する中身はアップロードCSVでも、
+    sha は保存先の現在値でなければならない。
+    """
+    _install_streamlit_stub(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+
+    import storage as sg
+    stored = "ticker,name,asset_class,shares,cost_per_share\n1605,INPEX,jp_dividend,10,1000\n"
+    monkeypatch.setattr(sg, "load", lambda cfg: (stored, "sha-from-storage"))
+
+    import app
+    uploaded = (
+        "ticker,name,asset_class,shares,cost_per_share,industry\n"
+        "9432,NTT,jp_dividend,100,150,情報・通信業\n"
+    )
+    rows, src, sha = app.load_rows(uploaded)
+
+    assert [r["ticker"] for r in rows] == [9432]  # 中身はアップロードCSV
+    assert src == "アップロードCSV"
+    assert sha == "sha-from-storage"  # sha は保存先の現在値
+
+
+def test_uploaded_csv_sha_is_none_without_storage(monkeypatch):
+    """保存先未設定なら sha は None（新規作成扱い）。"""
+    _install_streamlit_stub(monkeypatch, use_live=False, secrets=None)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+
+    import storage as sg
+    monkeypatch.setattr(sg, "load", lambda cfg: (None, None))
+
+    import app
+    _, _, sha = app.load_rows(
+        "ticker,name,asset_class,shares,cost_per_share\n9432,NTT,jp_dividend,100,150\n"
+    )
+    assert sha is None
+
+
 def test_account_labels_cover_all_stored_values(monkeypatch):
     """画面の表示名が保存されうる値をすべて網羅していること。
 

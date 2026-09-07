@@ -216,6 +216,11 @@ def save(
         return (True, "保存しました。")
     if res.status_code == 409:
         return (False, "他の端末で更新されています。読み込み直してから保存してください。")
+    if res.status_code == 422:
+        # 既存ファイルなのに sha を添えていない（保存先の現在値が取れていない）場合に出る。
+        # HTTP番号だけでは何をすればよいか分からないので、次の操作を書く
+        return (False, "保存先の最新状態を取得できていません。"
+                       "ページを再読み込みしてから、もう一度保存してください。")
     if res.status_code in (401, 403):
         return (False, "保存先への権限がありません（トークンを確認してください）。")
     if res.status_code == 404:

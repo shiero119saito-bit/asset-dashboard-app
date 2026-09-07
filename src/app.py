@@ -166,7 +166,11 @@ def load_rows(uploaded_text: str | None = None) -> tuple[list[dict], str, str | 
     sha は保存時の競合検知に使う（storage 以外から読んだ場合は None）。
     """
     if uploaded_text is not None and uploaded_text.strip() != "":
-        return dataio.parse_holdings_csv(uploaded_text), "アップロードCSV", None
+        # 表示する中身はアップロードCSVだが、sha は保存先の現在値が要る。
+        # GitHub は既存ファイルへの sha 無し PUT を 422 で弾くため、None のままだと
+        # 「置換」で取り込んだ内容を保存できない（実害：HTTP 422）
+        _, sha = sg.load(storage_config())
+        return dataio.parse_holdings_csv(uploaded_text), "アップロードCSV", sha
 
     stored_text, sha = sg.load(storage_config())
     if stored_text:
