@@ -256,3 +256,24 @@ def test_depletion_age_returns_none_when_it_lasts():
 def test_depletion_age_reports_year_it_runs_out():
     # 年0%運用・年60万取り崩し・300万 → 5年で尽きる
     assert sim.depletion_age(55, 3_000_000, 0.0, 50_000, horizon_years=40) == 60
+
+
+def test_dividend_cf_yield_applies_only_to_new_purchases():
+    """想定配当利回りは**その年の買い付け額**にだけ掛かる（＝購入時利回り）。
+
+    既存分に掛かると解釈すると、評価額利回りを入れたくなり将来配当を誤る。
+    """
+    points = sim.project_dividend_cf(
+        current_annual_dividend=100_000, monthly=100_000, years=1,
+        dividend_yield=4.0, dividend_growth=0.0, income_ratio=1.0, tax_rate=0.0,
+    )
+    # 既存10万（増配0%）＋ 年120万の買付 × 4% ＝ 4.8万 → 14.8万
+    assert points[1].annual_pre_tax == pytest.approx(148_000)
+
+
+def test_dividend_cf_growth_applies_only_to_existing():
+    points = sim.project_dividend_cf(
+        current_annual_dividend=100_000, monthly=0, years=1,
+        dividend_yield=4.0, dividend_growth=5.0, income_ratio=1.0, tax_rate=0.0,
+    )
+    assert points[1].annual_pre_tax == pytest.approx(105_000)

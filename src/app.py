@@ -732,26 +732,30 @@ def _render_birth_date_input(cfg: sg.StorageConfig | None = None) -> date | None
 
 
 def _render_dividend_cf_tab(
-    current_annual_dividend: float, current_yield: float, years: int, target_age: int,
-    tax_rate: float,
+    current_annual_dividend: float, purchase_yield: float, years: int, target_age: int,
+    tax_rate: float, growth_default: float = sm.DEFAULT_DIVIDEND_GROWTH,
 ) -> None:
-    """配当CFタブ：目標（月6〜10万）への到達見込み。
+    """配当CFの推移：既存分は増配で伸び、新規買付分が利回り分の配当を上乗せする。
+
+    purchase_yield は**これから買う分の利回り**（購入時利回り）。計算式が
+    「その年の買い付け額 × 利回り」なので、評価額利回りを入れてはいけない
+    （値上がり後の低い利回りを新規購入に当てることになり、将来配当を過小評価する）。
 
     tax_rate はいまの保有の口座構成から出した実効税率。一律 20.315% で見積もると、
     NISA 分が非課税である実態を反映できず手取りを過小評価する。
     """
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     monthly = c1.number_input(
         "毎月の積立額", value=sm.DEFAULT_MONTHLY_CONTRIBUTION, step=10_000.0,
         format="%.0f", key="cf_monthly",
     )
-    dividend_yield = c2.number_input(
-        "想定配当利回り（%）",
-        value=float(round(current_yield, 2)) if current_yield > 0 else 4.0,
-        step=0.1, format="%.2f",
+    dividend_growth = c2.number_input(
+        "想定増配率（%/年）", value=float(growth_default), step=0.5, format="%.1f"
     )
-    dividend_growth = c3.number_input(
-        "想定増配率（%/年）", value=sm.DEFAULT_DIVIDEND_GROWTH, step=0.5, format="%.1f"
+    dividend_yield = purchase_yield
+    st.caption(
+        f"新規購入の想定利回り {dividend_yield:.2f}%（上の設定値）を、その年の買い付け額に掛ける。"
+        "既存の保有分には掛からず、増配率だけで伸びる。"
     )
 
     income_ratio = st.slider(
@@ -1404,8 +1408,9 @@ def _render_dividend_plan(holdings, div_map, history_rows, goals, plan, cfg) -> 
     st.subheader("配当CFの推移")
     _render_dividend_cf_tab(
         current_annual_dividend=dv.total_annual_dividend(holdings, div_map, pre_tax=True),
-        current_yield=dv.yield_on_market(holdings, div_map),
+        purchase_yield=assumed_yield,
         years=years, target_age=target_age, tax_rate=tax_rate,
+        growth_default=goals["scenario_growth_mid"],
     )
 
     st.subheader("資産状況（参考）")
