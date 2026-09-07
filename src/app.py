@@ -1064,8 +1064,10 @@ def _plan_numbers(holdings, div_map, cash_rows, income_rows, goals, birth_date) 
     monthly_income = (
         dividend_future / 12 + goals["goal_withdrawal_monthly"] + business + labor
     )
+    # 月間の配当目標は**年間目標を12で割って導く**。別々に保存された値を混ぜると、
+    # 達成率（年間ベース）と想定月収（月間ベース）が食い違う
     goal_monthly = (
-        goals["goal_dividend_monthly"] + goals["goal_withdrawal_monthly"]
+        goals["goal_dividend_annual"] / 12 + goals["goal_withdrawal_monthly"]
         + goals["goal_business_monthly"] + goals["goal_labor_monthly"]
     )
     return {
@@ -1656,7 +1658,7 @@ def _render_goal_bars(holdings, div_map, cash_rows, goals, compact: bool = False
     total_assets = ca.net_worth(pf.total_market(holdings), cash_rows)
     items = [
         ("年間配当（税抜）", annual_after, goals["goal_dividend_annual"]),
-        ("月間配当（税抜）", annual_after / 12, goals["goal_dividend_monthly"]),
+        ("月間配当（税抜）", annual_after / 12, goals["goal_dividend_annual"] / 12),
         ("総資産", total_assets, goals["goal_net_worth"]),
     ]
     for label, current, goal in items:
@@ -1857,14 +1859,29 @@ def _render_goal_editor(cfg) -> None:
     goals = load_goals(cfg)
 
     st.caption("**目標**（配当は税抜＝手取り基準）")
-    g1, g2, g3, g4 = st.columns(4)
+    g1, g2, g3 = st.columns(3)
     target_age = g1.number_input("目標年齢", value=int(goals["target_age"]),
                                  min_value=30, max_value=90, step=1, key="goal_target_age")
-    dividend_annual = g2.number_input("年間配当（税抜）", value=int(goals["goal_dividend_annual"]),
-                                      min_value=0, step=100_000, key="goal_annual")
-    dividend_monthly = g3.number_input("月間配当（税抜）", value=int(goals["goal_dividend_monthly"]),
-                                       min_value=0, step=10_000, key="goal_monthly")
-    net_worth = g4.number_input("総資産", value=int(goals["goal_net_worth"]),
+    # 年間と月間を別々に入力できると、片方だけ直したときに達成率（年間ベース）と
+    # 想定月収（月間ベース）が食い違う。**年間を唯一の入力**にして月間は12で割る
+    dividend_basis = g2.radio(
+        "配当目標の入力単位", ["年間", "月間"], horizontal=True, key="goal_dividend_basis",
+    )
+    if dividend_basis == "年間":
+        dividend_annual = float(g3.number_input(
+            "年間配当（税抜）", value=int(goals["goal_dividend_annual"]),
+            min_value=0, step=100_000, key="goal_annual",
+        ))
+    else:
+        dividend_annual = float(g3.number_input(
+            "月間配当（税抜）", value=int(round(goals["goal_dividend_annual"] / 12)),
+            min_value=0, step=10_000, key="goal_monthly",
+        )) * 12
+    dividend_monthly = dividend_annual / 12
+    g3.caption(f"年 {yen(dividend_annual)} ／ 月 {yen(dividend_monthly)}")
+
+    n1, _ = st.columns([1, 2])
+    net_worth = n1.number_input("総資産", value=int(goals["goal_net_worth"]),
                                 min_value=0, step=1_000_000, key="goal_net_worth")
 
     i1, i2, i3 = st.columns(3)

@@ -409,6 +409,28 @@ def test_load_goals_fills_keys_added_later(monkeypatch):
     assert set(goals) == set(dataio.DEFAULT_GOALS)          # 増えたキーは既定値で埋まる
 
 
+def test_monthly_dividend_goal_is_derived_from_annual(monkeypatch):
+    """月間目標は年間目標から導く。別々に持つと達成率と想定月収が食い違う。"""
+    st_stub = _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage",
+                "cash", "income", "snapshots", "dividend_history"):
+        sys.modules.pop(mod, None)
+    import app
+    import dataio
+    import portfolio as pf
+    # 年間60万・月間は矛盾した10万で保存されている状態
+    st_stub.session_state[app.GOALS_STATE] = {
+        **dataio.DEFAULT_GOALS, "goal_dividend_annual": 600_000.0,
+        "goal_dividend_monthly": 100_000.0,
+    }
+    goals = app.load_goals(None)
+    plan = app._plan_numbers(
+        pf.build_holdings([], {}), {}, [], [], goals, date(1983, 8, 21)
+    )
+    # 月収目標は 配当5万（＝60万/12）＋取崩5万＋事業5万＋労働5万 ＝ 20万
+    assert plan["goal_monthly"] == 200_000.0
+
+
 def test_main_tabs_are_rendered(monkeypatch):
     """6タブが作られること。構成を変えたらここが落ちる（意図した変更なら直す）。"""
     st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
