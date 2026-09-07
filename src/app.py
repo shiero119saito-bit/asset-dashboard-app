@@ -956,25 +956,60 @@ def _delta_text(change: tuple[float, float] | None, unit: str = "") -> str | Non
     return f"{sign}{yen_short(abs(delta))}{unit}（{rate:+.1f}%）"
 
 
-def _kpi_card(column, label: str, value: str, delta: str | None = None,
-              subs: tuple[str, ...] = (), progress: float | None = None) -> None:
-    """KPI 1枚。枠線つきカードで区切り、主数字の下に補足を薄く小さく置く。
+# KPI帯のスタイル。Streamlit の st.metric は1画面に6項目を置く前提の余白ではないため、
+# 行間・ラベル・補足の縦寸法を自前で決める（枠は6枚のカードではなく帯全体に1つ）
+KPI_STYLE = """
+<style>
+.kpi { padding: 2px 2px 4px; }
+.kpi-label { font-size: 0.78rem; opacity: 0.65; line-height: 1.2; margin-bottom: 1px; }
+.kpi-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; line-height: 1.1; }
+.kpi-value { font-size: 1.65rem; font-weight: 600; letter-spacing: -0.01em;
+             font-variant-numeric: tabular-nums; }
+.kpi-side { font-size: 0.82rem; opacity: 0.65; font-variant-numeric: tabular-nums; }
+.kpi-side.up { color: #1f7a5a; opacity: 1; }
+.kpi-side.down { color: #a63a4a; opacity: 1; }
+.kpi-sub { font-size: 0.76rem; opacity: 0.6; line-height: 1.35;
+           font-variant-numeric: tabular-nums; }
+.kpi-track { height: 4px; border-radius: 2px; background: rgba(128,128,128,.22);
+             margin: 4px 0 3px; overflow: hidden; }
+.kpi-track > span { display: block; height: 100%; background: #b8871f; }
+/* Cloud はダークテーマで開かれる。暗い地では緑/臙脂が沈むので明度を上げる */
+@media (prefers-color-scheme: dark) {
+  .kpi-side.up { color: #4bbd91; }
+  .kpi-side.down { color: #e0798a; }
+  .kpi-track > span { background: #d7a94a; }
+}
+</style>
+"""
 
-    主数字は**円のフル桁**で出す（万表記だと桁感が掴めない）。1行3枚に抑えているため
-    ¥15,240,000 でも切れない。補足のほうは万表記＝比較しやすさを優先する。
-    """
-    with column.container(border=True):
-        st.metric(label, value, delta)
-        if progress is not None:
-            st.progress(min(max(progress, 0.0), 1.0))
-        for text in subs:
-            st.caption(text)
+
+def _kpi_cell(column, label: str, value: str, side: str = "", tone: str = "",
+              subs: tuple[str, ...] = (), progress: float | None = None) -> None:
+    """KPI 1項目。主数字は円のフル桁、右横に補足（前月比・現在/目標）、下に薄い補足行。"""
+    side_html = f'<span class="kpi-side {tone}">{side}</span>' if side else ""
+    bar_html = ""
+    if progress is not None:
+        width = min(max(progress, 0.0), 1.0) * 100.0
+        bar_html = f'<div class="kpi-track"><span style="width:{width:.1f}%"></span></div>'
+    subs_html = "".join(f'<div class="kpi-sub">{text}</div>' for text in subs)
+    column.markdown(
+        f'<div class="kpi"><div class="kpi-label">{label}</div>'
+        f'<div class="kpi-main"><span class="kpi-value">{value}</span>{side_html}</div>'
+        f'{bar_html}{subs_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _tone(value: float) -> str:
+    """増減の色分け（プラス＝緑・マイナス＝臙脂）。"""
+    return "up" if value >= 0 else "down"
 
 
 def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, goals) -> None:
     """全タブ共通のKPI。ここは「現在値」だけを出し、分解は各タブでやる。
 
-    3枚 × 2段。上段＝いまの資産、下段＝成果と目標。
+    3項目 × 2段を**1つの枠**に収める（項目ごとのカードにはしない）。
+    上段＝いまの資産、下段＝成果と目標。
     """
     market = pf.total_market(holdings)
     cash_total = ca.total(cash_rows)
@@ -983,6 +1018,7 @@ def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, g
     annual_after = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
     received_total = sum(dh.by_year(history_rows).values())
     gain = pf.total_gain(holdings)
+    gain_rate = pf.total_gain_rate(holdings)
     cost = pf.total_cost(holdings)
     total_return = gain + received_total
 
@@ -991,52 +1027,52 @@ def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, g
     asset_progress = dataio.goal_progress(total_assets, goal_net)
     dividend_progress = dataio.goal_progress(annual_after, goal_annual)
 
-    # --- 上段：いまの資産 ---
-    a1, a2, a3 = st.columns(3)
-    _kpi_card(
-        a1, "総資産", yen(total_assets),
-        _delta_text(sn.change_from_previous(snapshot_rows, "net_worth")),
-        subs=(
-            f"現金：{yen_short(cash_total)}（{ca.cash_ratio(market, cash_rows):.1f}%）",
-            f"運用：{yen_short(market)}（{ca.invested_ratio(market, cash_rows):.1f}%）",
-        ),
-    )
-    _kpi_card(
-        a2, "評価損益", yen(gain), f"{pf.total_gain_rate(holdings):+.2f}%",
-        subs=(f"元本：{yen_short(cost)}",),
-    )
-    _kpi_card(
-        a3, "目標達成率（資産）", f"{asset_progress:.1f}%",
-        progress=asset_progress / 100.0,
-        subs=(
-            f"目標：{yen_short(goal_net)}",
-            f"残り：{yen_short(max(0.0, goal_net - total_assets))}",
-        ),
-    )
+    change = sn.change_from_previous(snapshot_rows, "net_worth")
+    st.markdown(KPI_STYLE, unsafe_allow_html=True)
 
-    # --- 下段：成果と目標 ---
-    b1, b2, b3 = st.columns(3)
-    # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
-    _kpi_card(
-        b1, "トータルリターン", yen(total_return),
-        f"{total_return / cost * 100:+.1f}%" if cost else None,
-        subs=("累計配当：" + (yen_short(received_total) if history_rows else "未記録"),),
-    )
-    _kpi_card(
-        b2, "年間予想配当", yen(annual_pre),
-        subs=(
-            f"税抜：{yen_short(annual_after)}",
-            f"月平均（税抜）：{yen_short(annual_after / 12)}",
-        ),
-    )
-    _kpi_card(
-        b3, "目標達成率（配当）", f"{dividend_progress:.1f}%",
-        progress=dividend_progress / 100.0,
-        subs=(
-            f"目標：年 {yen_short(goal_annual)}（税抜）",
-            f"残り：{yen_short(max(0.0, goal_annual - annual_after))}",
-        ),
-    )
+    with st.container(border=True):
+        a1, a2, a3 = st.columns(3)
+        _kpi_cell(
+            a1, "総資産", yen(total_assets),
+            side=_delta_text(change) or "", tone=_tone(change[0]) if change else "",
+            subs=(
+                f"現金：{yen_short(cash_total)}（{ca.cash_ratio(market, cash_rows):.1f}%）",
+                f"運用：{yen_short(market)}（{ca.invested_ratio(market, cash_rows):.1f}%）",
+            ),
+        )
+        _kpi_cell(
+            a2, "評価損益", yen(gain),
+            side=f"{gain_rate:+.2f}%", tone=_tone(gain_rate),
+            subs=(f"元本：{yen_short(cost)}",),
+        )
+        _kpi_cell(
+            a3, "目標達成率（資産）", f"{asset_progress:.1f}%",
+            side=f"{yen_short(total_assets)} / {yen_short(goal_net)}",
+            progress=asset_progress / 100.0,
+            subs=(f"残り：{yen_short(max(0.0, goal_net - total_assets))}",),
+        )
+
+        b1, b2, b3 = st.columns(3)
+        # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
+        return_rate = (total_return / cost * 100) if cost else 0.0
+        _kpi_cell(
+            b1, "トータルリターン", yen(total_return),
+            side=f"{return_rate:+.1f}%" if cost else "", tone=_tone(return_rate),
+            subs=("累計配当：" + (yen_short(received_total) if history_rows else "未記録"),),
+        )
+        _kpi_cell(
+            b2, "年間予想配当", yen(annual_pre),
+            subs=(
+                f"税抜：{yen_short(annual_after)}",
+                f"月平均（税抜）：{yen_short(annual_after / 12)}",
+            ),
+        )
+        _kpi_cell(
+            b3, "目標達成率（配当）", f"{dividend_progress:.1f}%",
+            side=f"{yen_short(annual_after)} / {yen_short(goal_annual)}",
+            progress=dividend_progress / 100.0,
+            subs=(f"残り：{yen_short(max(0.0, goal_annual - annual_after))}（税抜・年）",),
+        )
 
 
 def _snapshot_notice(snapshot_rows) -> bool:
