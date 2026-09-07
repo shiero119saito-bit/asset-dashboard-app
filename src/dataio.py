@@ -31,6 +31,9 @@ HOLDINGS_COLUMNS = (
     "industry",
     "market",
     "div_per_share",
+    # 購入時点の年1株配当。購入時利回り（＝新規投資の効率）を出すために要る。
+    # 現在の配当（div_per_share）は増配で動くため、簿価利回りとは別指標になる
+    "div_at_purchase",
     "purpose",
     "source",
     # 口座区分。税率が変わる（NISA は国内課税が非課税）ため、同一銘柄でも口座別に行を分ける
@@ -110,8 +113,8 @@ ACCOUNTS = (ACCOUNT_SPECIFIC, ACCOUNT_NISA_OLD, ACCOUNT_NISA_TSUMITATE, ACCOUNT_
 # 再取込で行が口座別に分割されたとき、分割前の行から引き継ぐ分類情報。
 # これが無いと purpose や isin（投信の基準価額取得に必要）が分割の瞬間に消える
 META_COLUMNS = (
-    "asset_class", "sector", "industry", "market", "div_per_share", "purpose",
-    "isin", "assoc_fund_cd",
+    "asset_class", "sector", "industry", "market", "div_per_share", "div_at_purchase",
+    "purpose", "isin", "assoc_fund_cd",
 )
 
 
@@ -163,10 +166,10 @@ def _default_metadata(name: str, hint: dict | None = None) -> dict:
     """
     if any(marker in name for marker in REIT_NAME_MARKERS):
         meta = {"asset_class": "reit", "sector": "REIT", "industry": "REIT",
-                "market": "jp", "div_per_share": "", "purpose": ""}
+                "market": "jp", "div_per_share": "", "div_at_purchase": "", "purpose": ""}
     else:
         meta = {"asset_class": "jp_dividend", "sector": "個別株", "industry": "",
-                "market": "jp", "div_per_share": "", "purpose": ""}
+                "market": "jp", "div_per_share": "", "div_at_purchase": "", "purpose": ""}
     if hint:
         for key in ("asset_class", "sector", "industry", "market"):
             if hint.get(key):
@@ -294,9 +297,27 @@ def serialize_birth_date(birth: date, existing: str | None = None) -> str:
 # 既定値は Shiero の戦略（55歳で月6〜10万のCF・資産形成の到達点）に合わせた初期値。
 # 画面から変更できる＝ここは「未設定のときの出発点」でしかない
 DEFAULT_GOALS = {
-    "goal_dividend_annual": 1_000_000.0,   # 年間配当（税抜）
+    # --- 目標（金額・年齢）。0以下は未設定として既定値に戻す ---
+    "target_age": 55.0,                    # セミリタイア設計の基準年齢
+    "goal_dividend_annual": 600_000.0,     # 年間配当（税抜）＝月5万
+    "goal_dividend_monthly": 50_000.0,     # 月間配当（税抜）
+    "goal_withdrawal_monthly": 50_000.0,   # インデックスの取り崩し月額
+    "goal_business_monthly": 50_000.0,     # 事業（副業）月額
+    "goal_labor_monthly": 50_000.0,        # 労働収入（パート）月額
     "goal_net_worth": 20_000_000.0,        # 総資産
-    "goal_dividend_monthly": 100_000.0,    # 月間配当（税抜）
+    # --- 前提値（率）。0を有効な入力として受け付ける ---
+    "assumed_purchase_yield": 4.0,         # 新規購入の想定利回り（%・額面）
+    "assumed_index_return": 5.0,           # インデックスの想定年率（%）
+    "assumed_index_monthly": 50_000.0,     # インデックスへの毎月の積立額
+    "scenario_growth_low": 0.0,            # 増配シナリオ：保守
+    "scenario_growth_mid": 3.0,            # 増配シナリオ：標準
+    "scenario_growth_high": 5.0,           # 増配シナリオ：強気
+}
+
+# 0 を有効な値として受け付けるキー（増配率0%＝保守シナリオは正当な設定）
+ZERO_ALLOWED = {
+    "assumed_purchase_yield", "assumed_index_return", "assumed_index_monthly",
+    "scenario_growth_low", "scenario_growth_mid", "scenario_growth_high",
 }
 
 
@@ -320,7 +341,7 @@ def parse_goals(text: str | None) -> dict[str, float]:
             value = float(settings[key])
         except (KeyError, TypeError, ValueError):
             continue
-        if value > 0:
+        if value > 0 or (key in ZERO_ALLOWED and value >= 0):
             goals[key] = value
     return goals
 

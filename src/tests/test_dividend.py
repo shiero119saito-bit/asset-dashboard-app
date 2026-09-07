@@ -204,3 +204,65 @@ def test_effective_tax_rate_without_dividend_falls_back_to_domestic_rate():
     # 配当0だと 0/0 になる。将来の見積もりに使うため国内税率を返す
     assert dv.effective_tax_rate([_holding("jp", "nisa_growth")], {}) == pytest.approx(0.20315)
     assert dv.effective_tax_rate([], {}) == pytest.approx(0.20315)
+
+
+# --- 55歳設計：購入時利回り・不足配当・必要追加投資額（Phase 8）---
+
+
+PURCHASE_ROWS = [
+    # 100万円で買って購入時配当4万（利回り4%）
+    {"ticker": "A", "name": "A", "asset_class": "jp_dividend", "shares": 100,
+     "cost_per_share": 10000, "market": "jp", "div_at_purchase": 400},
+    # 購入時配当が未入力＝購入時利回りの母数に入れない
+    {"ticker": "B", "name": "B", "asset_class": "jp_dividend", "shares": 100,
+     "cost_per_share": 5000, "market": "jp"},
+]
+
+
+def test_yield_at_purchase_uses_only_recorded_holdings():
+    """未入力の銘柄を母数に入れると利回りが薄まる。入力済みだけで加重平均する。"""
+    holdings = pf.build_holdings(PURCHASE_ROWS, {})
+    assert dv.yield_at_purchase(holdings) == pytest.approx(4.0)
+
+
+def test_yield_at_purchase_without_any_record_is_none():
+    holdings = pf.build_holdings([PURCHASE_ROWS[1]], {})
+    assert dv.yield_at_purchase(holdings) is None
+
+
+def test_shortfall_never_negative():
+    assert dv.shortfall(600_000, 400_000) == pytest.approx(200_000)
+    assert dv.shortfall(600_000, 700_000) == 0.0
+
+
+def test_required_investment_uses_after_tax_yield():
+    """目標が税抜なので、額面利回りのまま割ると必要額を約2割過小に見積もる。"""
+    # 不足20万・想定利回り4%・税率20.315% → 手取り利回り 3.1874% → 約627万
+    got = dv.required_investment(200_000, 4.0, dv.TAX_RATE["jp"])
+    assert got == pytest.approx(200_000 / (0.04 * (1 - 0.20315)))
+    # 非課税（NISA前提）なら 500万で足りる＝税率の効果が効いている
+    assert dv.required_investment(200_000, 4.0, 0.0) == pytest.approx(5_000_000)
+
+
+def test_required_investment_zero_cases():
+    assert dv.required_investment(0.0, 4.0, 0.2) == 0.0        # 不足なし
+    assert dv.required_investment(200_000, 0.0, 0.2) == 0.0    # 利回り未設定
+
+
+def test_project_dividend_compounds_growth():
+    assert dv.project_dividend(400_000, 3.0, 13) == pytest.approx(400_000 * 1.03 ** 13)
+    assert dv.project_dividend(400_000, 3.0, 0) == pytest.approx(400_000)
+
+
+def test_growth_scenarios_reduce_required_investment():
+    """増配率が高いほど必要追加投資は小さくなる（この構造を画面で見せる）。"""
+    scenarios = dv.growth_scenarios(
+        current_annual=400_000, target_annual=600_000, years=13,
+        purchase_yield_pct=4.0, tax_rate=0.0,
+    )
+    assert [s["growth"] for s in scenarios] == [0.0, 3.0, 5.0]
+    assert scenarios[0]["required"] > scenarios[1]["required"] > scenarios[2]["required"]
+    # 保守シナリオは増配を織り込まない＝不足20万 ÷ 4% ＝ 500万
+    assert scenarios[0]["required"] == pytest.approx(5_000_000)
+    # 強気（5%・13年）は目標を超えるため追加投資不要
+    assert scenarios[2]["required"] == 0.0

@@ -383,7 +383,7 @@ def test_yen_short_keeps_kpi_values_readable(monkeypatch):
 # --- タブ構成とKPI（Phase 7 の再編）---
 
 
-MAIN_TABS = ["概要", "配当", "資産・成績", "ポートフォリオ", "目標", "データ"]
+MAIN_TABS = ["概要", "配当", "インデックス", "収入計画", "資産・成績", "ポートフォリオ", "データ"]
 
 
 def test_kpi_values_are_full_yen(monkeypatch):
@@ -405,7 +405,8 @@ def test_main_tabs_are_rendered(monkeypatch):
 def test_data_tab_has_every_editor(monkeypatch):
     """データタブの保存ボタンが全部出ること（保存先が設定済みの場合）。"""
     st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
-    for label in ("保存", "現金を保存", "目標を保存", "配当実績を保存", "今の状態を記録"):
+    for label in ("保存", "現金を保存", "収入を保存", "目標・前提値を保存",
+                  "配当実績を保存", "今の状態を記録"):
         assert label in st.button_log
 
 
@@ -413,7 +414,7 @@ def test_runs_with_side_data_present(monkeypatch):
     """現金・スナップショット・配当実績がある状態でも通ること（推移・実績の描画経路）。"""
     st = _install_streamlit_stub(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
     for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage",
-                "snapshots", "cash", "dividend_history"):
+                "snapshots", "cash", "dividend_history", "income"):
         sys.modules.pop(mod, None)
 
     import prices as pr
@@ -432,6 +433,9 @@ def test_runs_with_side_data_present(monkeypatch):
         "2026-09-01,6100000,9500000,3400000,420000,336000,50,20,25,5,1200000,10700000\n"
     )
     cash_csv = "name,amount,note\n楽天銀行,1200000,生活防衛\n"
+    income_csv = ("month,category,amount,note\n"
+                  "2026-08,事業,40000,\n"
+                  "2026-09,労働収入,60000,\n")
     history_csv = ("date,ticker,name,gross,tax,net,account,source,note\n"
                    "2025-03-28,9432,NTT,5000,1016,3984,specific,sbi,\n"
                    "2026-03-27,9432,NTT,5500,0,5500,nisa_growth,sbi,\n")
@@ -444,6 +448,8 @@ def test_runs_with_side_data_present(monkeypatch):
             return (cash_csv, "sha")
         if path == "dividend_history.csv":
             return (history_csv, "sha")
+        if path == "income.csv":
+            return (income_csv, "sha")
         return (None, None)
 
     monkeypatch.setattr(sg, "load", fake_load)

@@ -220,3 +220,39 @@ def test_backtest_zero_price_month_is_skipped_safely():
     result = sim.backtest_dca(history, {"A": 1.0}, monthly=10_000)
     assert result.invested == pytest.approx(20_000)
     assert result.final_value == pytest.approx(10_000)  # 2ヶ月目の買付分のみ
+
+
+# --- 取り崩し（Phase 8：インデックスを55歳以降のCFにする）---
+
+
+def test_withdrawal_reduces_balance_and_reports_amount():
+    points = sim.project_withdrawal(
+        start_value=10_000_000, annual_return=0.0, monthly_withdrawal=50_000, years=2)
+    assert len(points) == 2
+    assert points[0].withdrawn == pytest.approx(600_000)
+    assert points[0].balance == pytest.approx(9_400_000)
+    assert points[1].balance == pytest.approx(8_800_000)
+
+
+def test_withdrawal_stops_at_depletion_without_negative_balance():
+    points = sim.project_withdrawal(
+        start_value=1_000_000, annual_return=0.0, monthly_withdrawal=100_000, years=10)
+    assert points[-1].balance == 0.0
+    assert len(points) == 1               # 10か月で尽きる＝1年目で打ち切り
+    assert points[-1].withdrawn == pytest.approx(1_000_000)
+
+
+def test_withdrawal_growth_can_outrun_spending():
+    """運用益が取り崩しを上回れば残高は減らない（4%ルール的な状態）。"""
+    points = sim.project_withdrawal(
+        start_value=20_000_000, annual_return=5.0, monthly_withdrawal=50_000, years=10)
+    assert points[-1].balance > 20_000_000
+
+
+def test_depletion_age_returns_none_when_it_lasts():
+    assert sim.depletion_age(55, 20_000_000, 5.0, 50_000, horizon_years=40) is None
+
+
+def test_depletion_age_reports_year_it_runs_out():
+    # 年0%運用・年60万取り崩し・300万 → 5年で尽きる
+    assert sim.depletion_age(55, 3_000_000, 0.0, 50_000, horizon_years=40) == 60

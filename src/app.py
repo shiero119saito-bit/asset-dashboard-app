@@ -20,6 +20,7 @@ import prices as pr
 import cash as ca
 import dividend_history as dh
 import fundprices as fp
+import income as inc
 import pricing_update as pu
 import simulation as sm
 import snapshots as sn
@@ -312,15 +313,18 @@ USER_SETTINGS_PATH = "user_settings.json"   # 生年月日・目標額（機微�
 SNAPSHOTS_PATH = "snapshots.csv"            # 月次の資産スナップショット
 HISTORY_PATH = "dividend_history.csv"       # 受取配当の実績
 CASH_PATH = "cash.csv"                      # 現金・預金の残高
+INCOME_PATH = "income.csv"                  # 事業・労働収入の実績
 VIEW_ORDERS_STATE = "view_orders"
 BIRTH_DATE_STATE = "birth_date"
 GOALS_STATE = "goals"
 CASH_STATE = "cash_rows"
 SNAPSHOT_STATE = "snapshot_rows"
 HISTORY_STATE = "dividend_history_rows"
+INCOME_STATE = "income_rows"
 
 # 保存先が未設定の環境（ローカル実行）で使うファイル
 CASH_CSV = os.path.join(DATA_DIR, "cash.csv")
+INCOME_CSV = os.path.join(DATA_DIR, "income.csv")
 SNAPSHOTS_CSV = os.path.join(DATA_DIR, "snapshots.csv")
 HISTORY_CSV = os.path.join(DATA_DIR, "dividend_history.csv")
 
@@ -608,7 +612,7 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
         [{col: dataio._cell(row.get(col)) for col in dataio.HOLDINGS_COLUMNS} for row in rows]
     )
     # 数値列は数値として編集させる（文字列のままだと計算に使えない値が入りうる）
-    for col in ("shares", "cost_per_share", "div_per_share", "price"):
+    for col in ("shares", "cost_per_share", "div_per_share", "div_at_purchase", "price"):
         editable[col] = pd.to_numeric(editable[col], errors="coerce")
 
     edited = st.data_editor(
@@ -634,6 +638,10 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
             ),
             "market": st.column_config.SelectboxColumn("上場市場", options=["jp", "us"]),
             "div_per_share": st.column_config.NumberColumn("1株配当", min_value=0.0, format="%,.2f"),
+            "div_at_purchase": st.column_config.NumberColumn(
+                "購入時1株配当", min_value=0.0, format="%,.2f",
+                help="買った時点の年1株配当。購入時利回り（新規投資の効率）の分子。未入力は集計対象外",
+            ),
             "purpose": st.column_config.SelectboxColumn(
                 "用途", options=[""] + list(PURPOSE_LABELS_BY_VALUE),
                 help="保有目的。dividend=配当収入 / growth=資産形成（インデックス）/ yutai=優待",
@@ -716,38 +724,6 @@ def _render_birth_date_input(cfg: sg.StorageConfig | None = None) -> date | None
         else:
             st.sidebar.warning(message)
     return birth
-
-
-def _render_accumulation_tab(current_value: float, years: int) -> None:
-    """つみたてタブ：将来の資産推移（投下元本と評価額）。"""
-    c1, c2, c3 = st.columns(3)
-    initial = c1.number_input(
-        "現在の資産額", value=float(round(current_value)), step=100_000.0, format="%.0f"
-    )
-    monthly = c2.number_input(
-        "毎月の積立額", value=sm.DEFAULT_MONTHLY_CONTRIBUTION, step=10_000.0, format="%.0f"
-    )
-    annual_return = c3.number_input(
-        "想定年率リターン（%）", value=sm.DEFAULT_ANNUAL_RETURN, step=0.5, format="%.1f"
-    )
-
-    points = sm.project_accumulation(initial, monthly, years, annual_return)
-    last = points[-1]
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric(f"{years}年後の評価額", yen(last.value))
-    m2.metric("投下元本", yen(last.principal))
-    m3.metric("運用益", yen(last.value - last.principal))
-
-    df = pd.DataFrame(
-        {
-            "経過年": [p.year for p in points] * 2,
-            "金額": [p.principal for p in points] + [p.value for p in points],
-            "区分": ["投下元本"] * len(points) + ["評価額"] * len(points),
-        }
-    )
-    fig = px.line(df, x="経過年", y="金額", color="区分", title="資産推移（想定）")
-    st.plotly_chart(fig, width="stretch")
 
 
 def _render_dividend_cf_tab(
@@ -1051,73 +1027,119 @@ def _tone(value: float) -> str:
     return "up" if value >= 0 else "down"
 
 
-def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, goals) -> None:
-    """全タブ共通のKPI。ここは「現在値」だけを出し、分解は各タブでやる。
+def _plan_numbers(holdings, div_map, cash_rows, income_rows, goals, birth_date) -> dict:
+    """55歳設計の共通計算。KPI帯・インデックス・収入計画の3か所で同じ値を使う。
 
-    3項目 × 2段を**1つの枠**に収める（項目ごとのカードにはしない）。
-    上段＝いまの資産、下段＝成果と目標。
+    配当は**保守シナリオ（増配0%）**を既定にする。増配は保証されないため、
+    生活設計の基準はここに置く（強気シナリオは配当タブで別途見せる）。
+    """
+    today = date.today()
+    target_age = int(goals["target_age"])
+    years = sm.years_until_age(birth_date, today, target_age)
+
+    index_now = sum(h.market_value for h in holdings if h.asset_class == "index")
+    index_points = sm.project_accumulation(
+        index_now, goals["assumed_index_monthly"], years, goals["assumed_index_return"]
+    )
+    index_future = index_points[-1].value
+
+    dividend_now = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
+    dividend_future = dv.project_dividend(dividend_now, goals["scenario_growth_low"], years)
+
+    # 事業・労働収入は実績があればその直近平均、無ければ目標値を置く
+    business_actual = inc.recent_average(income_rows, inc.BUSINESS)
+    labor_actual = inc.recent_average(income_rows, inc.LABOR)
+    business = business_actual or goals["goal_business_monthly"]
+    labor = labor_actual or goals["goal_labor_monthly"]
+
+    monthly_income = (
+        dividend_future / 12 + goals["goal_withdrawal_monthly"] + business + labor
+    )
+    goal_monthly = (
+        goals["goal_dividend_monthly"] + goals["goal_withdrawal_monthly"]
+        + goals["goal_business_monthly"] + goals["goal_labor_monthly"]
+    )
+    return {
+        "target_age": target_age,
+        "years": years,
+        "current_age": sm.age_at(birth_date, today),
+        "index_now": index_now,
+        "index_future": index_future,
+        "index_points": index_points,
+        "dividend_now": dividend_now,
+        "dividend_future": dividend_future,
+        "business": business,
+        "labor": labor,
+        "has_income_actuals": bool(business_actual or labor_actual),
+        "monthly_income": monthly_income,
+        "goal_monthly": goal_monthly,
+        "semi_retire": dataio.goal_progress(monthly_income, goal_monthly),
+        "total_assets": ca.net_worth(pf.total_market(holdings), cash_rows),
+    }
+
+
+def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, goals, plan) -> None:
+    """全タブ共通のKPI。**55歳のCF設計に効く数字だけ**を置き、細部は各タブへ送る。
+
+    3項目 × 2段を1つの枠に収める。上段＝いまの資産、下段＝55歳の生活設計。
     """
     market = pf.total_market(holdings)
-    cash_total = ca.total(cash_rows)
-    total_assets = ca.net_worth(market, cash_rows)
-    annual_pre = dv.total_annual_dividend(holdings, div_map, pre_tax=True)
-    annual_after = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
-    received_total = sum(dh.by_year(history_rows).values())
-    gain = pf.total_gain(holdings)
-    gain_rate = pf.total_gain_rate(holdings)
-    cost = pf.total_cost(holdings)
-    total_return = gain + received_total
-
-    goal_net = goals["goal_net_worth"]
-    goal_annual = goals["goal_dividend_annual"]
-    asset_progress = dataio.goal_progress(total_assets, goal_net)
-    dividend_progress = dataio.goal_progress(annual_after, goal_annual)
-
+    annual_after = plan["dividend_now"]
+    dividend_progress = dataio.goal_progress(annual_after, goals["goal_dividend_annual"])
     change = sn.change_from_previous(snapshot_rows, "net_worth")
+
     with st.container(border=True):
         a1, a2, a3 = st.columns(3)
         _kpi_cell(
-            a1, "総資産", yen(total_assets),
+            a1, "総資産", yen(plan["total_assets"]),
             side=_delta_text(change) or "", tone=_tone(change[0]) if change else "",
             subs=(
-                f"現金：{yen_short(cash_total)}（{ca.cash_ratio(market, cash_rows):.1f}%）",
+                f"現金：{yen_short(ca.total(cash_rows))}（{ca.cash_ratio(market, cash_rows):.1f}%）",
                 f"運用：{yen_short(market)}（{ca.invested_ratio(market, cash_rows):.1f}%）",
             ),
         )
         _kpi_cell(
-            a2, "評価損益", yen(gain),
-            side=f"{gain_rate:+.2f}%", tone=_tone(gain_rate),
-            subs=(f"元本：{yen_short(cost)}",), divider=True,
+            a2, "年間予想配当（税抜）", yen(annual_after),
+            side=f"月 {yen_short(annual_after / 12)}",
+            subs=(
+                f"税込：{yen_short(dv.total_annual_dividend(holdings, div_map, pre_tax=True))}",
+                f"簿価利回り：{dv.yield_on_cost(holdings, div_map):.2f}%",
+            ), divider=True,
         )
         _kpi_cell(
-            a3, "目標達成率（資産）", f"{asset_progress:.1f}%",
-            side=f"{yen_short(total_assets)} / {yen_short(goal_net)}",
-            progress=asset_progress / 100.0,
-            subs=(f"残り：{yen_short(max(0.0, goal_net - total_assets))}",), divider=True,
+            a3, "配当目標達成率", f"{dividend_progress:.1f}%",
+            side=f"{yen_short(annual_after)} / {yen_short(goals['goal_dividend_annual'])}",
+            progress=dividend_progress / 100.0,
+            subs=(f"不足：{yen_short(dv.shortfall(goals['goal_dividend_annual'], annual_after))}（年・税抜）",),
+            divider=True,
         )
 
         st.markdown('<hr class="kpi-hr">', unsafe_allow_html=True)
         b1, b2, b3 = st.columns(3)
-        # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
-        return_rate = (total_return / cost * 100) if cost else 0.0
         _kpi_cell(
-            b1, "トータルリターン", yen(total_return),
-            side=f"{return_rate:+.1f}%" if cost else "", tone=_tone(return_rate),
-            subs=("累計配当：" + (yen_short(received_total) if history_rows else "未記録"),),
+            b1, "インデックス", yen(plan["index_now"]),
+            side=f"→ {plan['target_age']}歳 {yen_short(plan['index_future'])}",
+            subs=(
+                f"積立：月 {yen_short(goals['assumed_index_monthly'])}"
+                f"・想定年率 {goals['assumed_index_return']:.1f}%",
+                f"残り {plan['years']}年（現在 {plan['current_age']}歳）",
+            ),
         )
         _kpi_cell(
-            b2, "年間予想配当", yen(annual_pre),
+            b2, f"{plan['target_age']}歳 想定月収", yen(plan["monthly_income"]),
+            side=f"目標 {yen_short(plan['goal_monthly'])}",
             subs=(
-                f"税抜：{yen_short(annual_after)}",
-                f"月平均（税抜）：{yen_short(annual_after / 12)}",
+                f"配当 {yen_short(plan['dividend_future'] / 12)}"
+                f"・取崩 {yen_short(goals['goal_withdrawal_monthly'])}",
+                f"事業 {yen_short(plan['business'])}・労働 {yen_short(plan['labor'])}"
+                + ("" if plan["has_income_actuals"] else "（目標値）"),
             ), divider=True,
         )
         _kpi_cell(
-            b3, "目標達成率（配当）", f"{dividend_progress:.1f}%",
-            side=f"{yen_short(annual_after)} / {yen_short(goal_annual)}",
-            progress=dividend_progress / 100.0,
-            subs=(f"残り：{yen_short(max(0.0, goal_annual - annual_after))}（税抜・年）",),
-            divider=True,
+            b3, "セミリタイア達成率", f"{plan['semi_retire']:.1f}%",
+            side=f"{yen_short(plan['monthly_income'])} / {yen_short(plan['goal_monthly'])}",
+            progress=plan["semi_retire"] / 100.0,
+            subs=("配当は増配0%（保守）で計算",), divider=True,
         )
 
 
@@ -1221,11 +1243,14 @@ def _render_rebalance(holdings, cfg) -> None:
 # ---------------- 配当 ----------------
 
 
-def _render_dividend_tab(holdings, div_map, months_map, history_rows, cfg) -> None:
-    """予定（保有×1株配当）と実績（受取記録）の両方を見る。"""
-    view = st.radio("表示", ["予定", "実績"], horizontal=True, key="div_view")
+def _render_dividend_tab(holdings, div_map, months_map, history_rows, goals, plan, cfg) -> None:
+    """予定（保有×1株配当）・実績（受取記録）・55歳設計（目標までの逆算）。"""
+    view = st.radio("表示", ["予定", "実績", "55歳設計"], horizontal=True, key="div_view")
     if view == "実績":
         _render_dividend_actuals(holdings, div_map, history_rows, cfg)
+        return
+    if view == "55歳設計":
+        _render_dividend_plan(holdings, div_map, history_rows, goals, plan, cfg)
         return
 
     f_col, t_col = st.columns([1, 1])
@@ -1301,6 +1326,93 @@ def _render_dividend_tab(holdings, div_map, months_map, history_rows, cfg) -> No
         for ticker, (name, amount) in per_ticker.items()
     ]).sort_values("年間配当", ascending=False)
     show_table(source_df.head(15), order_key="cols_div_source", cfg=cfg)
+
+
+def _render_dividend_plan(holdings, div_map, history_rows, goals, plan, cfg) -> None:
+    """「あといくら投資すれば目標配当に届くか」を出す。配当資産の主役はここ。
+
+    評価額ではなく**年間配当**を指標にする。株価が上がっても生活CFが増えるとは限らないため。
+    """
+    target_age = plan["target_age"]
+    years = plan["years"]
+    annual_after = plan["dividend_now"]
+    goal_annual = goals["goal_dividend_annual"]
+    tax_rate = dv.effective_tax_rate(holdings, div_map)
+    purchase_yield = dv.yield_at_purchase(holdings)
+
+    st.subheader("いまの配当と目標")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("年間予想配当（税抜）", yen(annual_after))
+    c2.metric("月間予想配当（税抜）", yen(annual_after / 12))
+    c3.metric(f"{target_age}歳の目標（年・税抜）", yen(goal_annual))
+    c4.metric("不足配当（年）", yen(dv.shortfall(goal_annual, annual_after)))
+
+    y1, y2, y3 = st.columns(3)
+    y1.metric("平均購入時利回り",
+              f"{purchase_yield:.2f}%" if purchase_yield is not None else "—")
+    y2.metric("簿価利回り", f"{dv.yield_on_cost(holdings, div_map):.2f}%")
+    y3.metric("評価額利回り", f"{dv.yield_on_market(holdings, div_map):.2f}%")
+    if purchase_yield is None:
+        y1.caption("購入時の1株配当が未入力。データタブで入れた銘柄から集計する")
+    st.caption(
+        "簿価利回り＝いまの配当 ÷ 投下元本（増配で上がる）。"
+        "購入時利回り＝買った時点の配当 ÷ 購入額（新規投資の効率）。"
+        f"実効税率 {tax_rate * 100:.2f}%（口座構成から算出）。"
+    )
+
+    st.subheader("目標達成に必要な追加投資額")
+    assumed_yield = st.number_input(
+        "新規購入の想定利回り（%・額面）", value=float(goals["assumed_purchase_yield"]),
+        min_value=0.0, step=0.1, format="%.2f", key="plan_purchase_yield",
+        help="既定値はデータタブで変更できる。購入時利回りの実測が出ていればそれを目安にする",
+    )
+    scenarios = dv.growth_scenarios(
+        current_annual=annual_after, target_annual=goal_annual, years=years,
+        purchase_yield_pct=assumed_yield, tax_rate=tax_rate,
+        growth_rates=(goals["scenario_growth_low"], goals["scenario_growth_mid"],
+                      goals["scenario_growth_high"]),
+    )
+    labels = ("保守", "標準", "強気")
+    table = pd.DataFrame([
+        {
+            "シナリオ": f"{label}（増配{row['growth']:.0f}%）",
+            f"{target_age}歳の配当（年）": round(row["projected"]),
+            "不足": round(row["shortfall"]),
+            "必要追加投資": round(row["required"]),
+            "月あたり": round(row["required"] / max(1, years) / 12),
+        }
+        for label, row in zip(labels, scenarios)
+    ])
+    show_table(table, order_key="cols_scenarios", cfg=cfg)
+    st.caption(
+        f"必要追加投資 ＝ 不足（税抜）÷（想定利回り {assumed_yield:.2f}% ×(1−実効税率)）。"
+        "**追加投資した分の将来増配は織り込んでいない**ため、多めに出る（保守側）。"
+        "増配は保証されないので、計画は保守シナリオを基準にすること。"
+    )
+
+    measured = dh.growth_rate(
+        [r for r in history_rows if not str(r.get("date", "")).startswith(str(date.today().year))]
+    )
+    if measured is not None:
+        st.caption(f"受取実績からの実測増配率は年 {measured:+.1f}%。シナリオの目安にする。")
+
+    st.subheader("配当CFの推移")
+    _render_dividend_cf_tab(
+        current_annual_dividend=dv.total_annual_dividend(holdings, div_map, pre_tax=True),
+        current_yield=dv.yield_on_market(holdings, div_map),
+        years=years, target_age=target_age, tax_rate=tax_rate,
+    )
+
+    st.subheader("資産状況（参考）")
+    st.caption("配当資産の評価額。**55歳の達成率には使わない**（株価が上がってもCFは増えないため）。")
+    dividend_holdings = pf.filter_by_purpose(holdings, ("dividend", "yutai"))
+    cost = sum(h.cost_value for h in dividend_holdings)
+    value = sum(h.market_value for h in dividend_holdings)
+    s1, s2, s3 = st.columns(3)
+    s1.metric("配当資産の評価額", yen(value))
+    s2.metric("投下元本", yen(cost))
+    s3.metric("含み損益", yen(value - cost),
+              f"{(value - cost) / cost * 100:+.1f}%" if cost else None)
 
 
 def _render_dividend_actuals(holdings, div_map, history_rows, cfg) -> None:
@@ -1546,58 +1658,162 @@ def _render_goal_bars(holdings, div_map, cash_rows, goals, compact: bool = False
             st.caption(f"残り {yen(remaining)}")
 
 
-def _render_goals_tab(holdings, div_map, cash_rows, history_rows, goals, birth_date, cfg) -> None:
-    """目標と、そこへ届く見込み。前提値は画面で変えられる。"""
-    st.subheader("達成率")
-    _render_goal_bars(holdings, div_map, cash_rows, goals)
-    st.caption("目標額はデータタブで変更できる。")
+def _render_index_tab(holdings, goals, plan, cfg) -> None:
+    """インデックスは評価額で管理し、55歳以降は取り崩してCFに変える。"""
+    target_age = plan["target_age"]
+    years = plan["years"]
 
-    st.subheader("シミュレーション")
-    market = pf.total_market(holdings)
-    target_age = st.number_input(
-        "目標年齢", value=sm.DEFAULT_TARGET_AGE, min_value=1, max_value=120, step=1
-    )
-    current_age = sm.age_at(birth_date, date.today())
-    years = sm.years_until_age(birth_date, date.today(), int(target_age))
+    st.subheader("いまと将来")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("現在の評価額", yen(plan["index_now"]))
+    c2.metric(f"{target_age}歳の予想額", yen(plan["index_future"]))
+    c3.metric("残り期間", f"{years}年")
     st.caption(
-        f"現在 {current_age}歳 → {int(target_age)}歳まで残り {years}年。"
-        "以下の数値は入力した前提で計算した結果であり、将来の予測や推奨ではない。"
+        f"毎月 {yen(goals['assumed_index_monthly'])} を年率 {goals['assumed_index_return']:.1f}% で"
+        "積み立てた場合。前提値はデータタブで変更できる。予測や推奨ではない。"
     )
-    if years == 0:
-        st.info("目標年齢に到達済み。目標年齢を引き上げると将来推移を確認できる。")
 
-    # 実績があれば増配率の既定値に使える。無い間は入力値のまま
-    measured_growth = dh.growth_rate(
-        [r for r in history_rows if not str(r.get("date", "")).startswith(str(date.today().year))]
+    points = plan["index_points"]
+    df = pd.DataFrame({
+        "経過年": [p.year for p in points] * 2,
+        "金額": [p.principal for p in points] + [p.value for p in points],
+        "区分": ["投下元本"] * len(points) + ["評価額"] * len(points),
+    })
+    st.plotly_chart(
+        px.line(df, x="経過年", y="金額", color="区分", title=f"{target_age}歳までの推移"),
+        width="stretch",
     )
-    if measured_growth is not None:
-        st.caption(f"受取実績からの増配率は年 {measured_growth:+.1f}%。配当CFの前提値の参考にする。")
 
-    tab_acc, tab_cf, tab_bt = st.tabs(["つみたて", "配当CF", "バックテスト"])
-    with tab_acc:
-        _render_accumulation_tab(market, years)
-    with tab_cf:
-        _render_dividend_cf_tab(
-            current_annual_dividend=dv.total_annual_dividend(holdings, div_map, pre_tax=True),
-            current_yield=dv.yield_on_market(holdings, div_map),
-            years=years,
-            target_age=int(target_age),
-            tax_rate=dv.effective_tax_rate(holdings, div_map),
-        )
-    with tab_bt:
-        _render_backtest_tab()
+    ages = [target_age, target_age + 5, target_age + 10]
+    horizon = pd.DataFrame([
+        {"年齢": f"{age}歳",
+         "予想評価額": round(sm.project_accumulation(
+             plan["index_now"], goals["assumed_index_monthly"],
+             max(0, age - plan["current_age"]), goals["assumed_index_return"])[-1].value)}
+        for age in ages
+    ])
+    show_table(horizon, order_key="cols_index_horizon", cfg=cfg)
+
+    st.subheader("取り崩し")
+    st.caption("55歳以降、毎月いくら引き出すと何歳まで持つか。定額取り崩しは相場が悪い年に負担が重くなる。")
+    w1, w2 = st.columns(2)
+    monthly_withdrawal = w1.number_input(
+        "毎月の取り崩し額", value=float(goals["goal_withdrawal_monthly"]),
+        min_value=0.0, step=10_000.0, format="%.0f", key="withdrawal_monthly",
+    )
+    withdrawal_return = w2.number_input(
+        "取り崩し期の想定年率（%）", value=float(goals["assumed_index_return"]),
+        step=0.5, format="%.1f", key="withdrawal_return",
+    )
+    depleted = sm.depletion_age(
+        target_age, plan["index_future"], withdrawal_return, monthly_withdrawal
+    )
+    d1, d2 = st.columns(2)
+    d1.metric("取り崩し開始時の残高", yen(plan["index_future"]))
+    d2.metric("枯渇年齢", f"{depleted}歳" if depleted else "60年後も残る")
+
+    wp = sm.project_withdrawal(plan["index_future"], withdrawal_return, monthly_withdrawal, 40)
+    if wp:
+        wdf = pd.DataFrame({
+            "年齢": [target_age + p.year for p in wp],
+            "残高": [round(p.balance) for p in wp],
+        })
+        st.plotly_chart(px.line(wdf, x="年齢", y="残高", title="取り崩し後の残高"), width="stretch")
+
+    st.subheader("バックテスト")
+    _render_backtest_tab()
+
+
+def _render_income_tab(income_rows, goals, plan, cfg) -> None:
+    """事業（副業）・労働収入（パート）の実績と、55歳想定月収の内訳。"""
+    target_age = plan["target_age"]
+
+    st.subheader(f"{target_age}歳の想定月収")
+    total = plan["monthly_income"]
+    breakdown = pd.DataFrame([
+        {"区分": "配当（税抜・増配0%）", "月額": round(plan["dividend_future"] / 12),
+         "目標": round(goals["goal_dividend_monthly"])},
+        {"区分": "インデックス取り崩し", "月額": round(goals["goal_withdrawal_monthly"]),
+         "目標": round(goals["goal_withdrawal_monthly"])},
+        {"区分": "事業", "月額": round(plan["business"]),
+         "目標": round(goals["goal_business_monthly"])},
+        {"区分": "労働収入", "月額": round(plan["labor"]),
+         "目標": round(goals["goal_labor_monthly"])},
+    ])
+    left, right = st.columns([1, 1])
+    left.plotly_chart(
+        _pie(dict(zip(breakdown["区分"], breakdown["月額"])), "区分",
+             f"{target_age}歳の月収内訳", group_small=False),
+        width="stretch",
+    )
+    show_table(breakdown, right, order_key="cols_income_breakdown", cfg=cfg)
+    m1, m2 = st.columns(2)
+    m1.metric("想定月収", yen(total))
+    m2.metric("目標月収", yen(plan["goal_monthly"]),
+              f"{plan['semi_retire']:.1f}% 達成")
+    if not plan["has_income_actuals"]:
+        st.caption("事業・労働収入は実績が未記録のため目標値で計算している。下で実績を入れると実測に切り替わる。")
+
+    st.subheader("実績（直近12か月の月平均）")
+    b1, b2 = st.columns(2)
+    business_avg = inc.recent_average(income_rows, inc.BUSINESS)
+    labor_avg = inc.recent_average(income_rows, inc.LABOR)
+    b1.metric("事業", yen(business_avg),
+              f"{inc.progress(business_avg, goals['goal_business_monthly']):.0f}% 達成")
+    b2.metric("労働収入", yen(labor_avg),
+              f"{inc.progress(labor_avg, goals['goal_labor_monthly']):.0f}% 達成")
+    st.caption("記録の無い月は0として平均する（稼働した月だけの平均だと実力を過大評価するため）。")
+
+    if income_rows:
+        monthly = inc.by_month(income_rows)
+        trend = pd.DataFrame({
+            "月": list(monthly), "合計": [round(v) for v in monthly.values()],
+        }).sort_values("月")
+        st.plotly_chart(px.bar(trend, x="月", y="合計", title="月別の収入（事業＋労働）"),
+                        width="stretch")
+    else:
+        st.info("収入の記録がまだない。データタブの「収入の記録」で月ごとに入力する。")
 
 
 # ---------------- データ ----------------
 
 
-def _render_data_tab(rows, sha, cfg, cash_rows, history_rows, holdings, div_map) -> None:
+def _render_data_tab(rows, sha, cfg, cash_rows, history_rows, income_rows,
+                     holdings, div_map) -> None:
     """編集・取込・設定をまとめる。普段は開かないタブ。"""
     _render_holdings_editor(rows, sha, cfg)
     _render_cash_editor(cash_rows)
+    _render_income_editor(income_rows)
     _render_goal_editor(cfg)
     _render_history_editor(history_rows)
     _render_snapshot_button(holdings, div_map, cash_rows)
+
+
+def _render_income_editor(income_rows) -> None:
+    """事業・労働収入の実績。月ごとに1行入れると55歳想定月収が実測に変わる。"""
+    st.subheader("収入の記録")
+    st.caption(
+        "事業（副業）と労働収入（パート）の**手取り**を月ごとに入力する。"
+        "配当の目標が税抜なので基準を揃える。同じ月・同じ区分は1行にまとめる。"
+    )
+    editable = pd.DataFrame(income_rows or [], columns=list(inc.INCOME_COLUMNS))
+    editable["amount"] = pd.to_numeric(editable["amount"], errors="coerce")
+    edited = st.data_editor(
+        editable, width="stretch", hide_index=True, num_rows="dynamic", key="income_editor",
+        column_config={
+            "month": st.column_config.TextColumn("月", help="YYYY-MM"),
+            "category": st.column_config.SelectboxColumn("区分", options=list(inc.CATEGORIES)),
+            "amount": st.column_config.NumberColumn("金額（手取り）", min_value=0.0, format="%,d"),
+            "note": st.column_config.TextColumn("メモ"),
+        },
+    )
+    if st.button("収入を保存", key="save_income"):
+        text = inc.serialize_csv(edited.to_dict("records"))
+        ok, message = save_side_csv(INCOME_STATE, INCOME_PATH, INCOME_CSV, text, inc.parse_csv,
+                                    "update income")
+        (st.success if ok else st.error)(message)
+        if ok:
+            st.rerun()
 
 
 def _render_cash_editor(cash_rows) -> None:
@@ -1626,21 +1842,64 @@ def _render_cash_editor(cash_rows) -> None:
 
 
 def _render_goal_editor(cfg) -> None:
-    """目標額の設定。達成率バーの分母になる。"""
-    st.subheader("目標の設定")
+    """目標と前提値の設定。KPIとシミュレーションの分母・係数はすべてここで決まる。"""
+    st.subheader("目標と前提値")
     goals = load_goals(cfg)
-    g1, g2, g3 = st.columns(3)
-    annual = g1.number_input("年間配当（税抜）", value=int(goals["goal_dividend_annual"]),
-                             min_value=0, step=100000, key="goal_annual")
-    monthly = g2.number_input("月間配当（税抜）", value=int(goals["goal_dividend_monthly"]),
-                              min_value=0, step=10000, key="goal_monthly")
-    net = g3.number_input("総資産", value=int(goals["goal_net_worth"]),
-                          min_value=0, step=1000000, key="goal_net_worth")
-    if st.button("目標を保存", key="save_goals"):
+
+    st.caption("**目標**（配当は税抜＝手取り基準）")
+    g1, g2, g3, g4 = st.columns(4)
+    target_age = g1.number_input("目標年齢", value=int(goals["target_age"]),
+                                 min_value=30, max_value=90, step=1, key="goal_target_age")
+    dividend_annual = g2.number_input("年間配当（税抜）", value=int(goals["goal_dividend_annual"]),
+                                      min_value=0, step=100_000, key="goal_annual")
+    dividend_monthly = g3.number_input("月間配当（税抜）", value=int(goals["goal_dividend_monthly"]),
+                                       min_value=0, step=10_000, key="goal_monthly")
+    net_worth = g4.number_input("総資産", value=int(goals["goal_net_worth"]),
+                                min_value=0, step=1_000_000, key="goal_net_worth")
+
+    i1, i2, i3 = st.columns(3)
+    withdrawal = i1.number_input("取り崩し月額", value=int(goals["goal_withdrawal_monthly"]),
+                                 min_value=0, step=10_000, key="goal_withdrawal")
+    business = i2.number_input("事業（月額）", value=int(goals["goal_business_monthly"]),
+                               min_value=0, step=10_000, key="goal_business")
+    labor = i3.number_input("労働収入（月額）", value=int(goals["goal_labor_monthly"]),
+                            min_value=0, step=10_000, key="goal_labor")
+
+    st.caption("**前提値**（シミュレーションの係数。予測や推奨ではない）")
+    a1, a2, a3 = st.columns(3)
+    purchase_yield = a1.number_input("新規購入の想定利回り（%）",
+                                     value=float(goals["assumed_purchase_yield"]),
+                                     min_value=0.0, step=0.1, format="%.2f", key="assume_yield")
+    index_return = a2.number_input("インデックスの想定年率（%）",
+                                   value=float(goals["assumed_index_return"]),
+                                   min_value=0.0, step=0.5, format="%.1f", key="assume_return")
+    index_monthly = a3.number_input("インデックスへの毎月の積立額",
+                                    value=int(goals["assumed_index_monthly"]),
+                                    min_value=0, step=10_000, key="assume_monthly")
+
+    s1, s2, s3 = st.columns(3)
+    low = s1.number_input("増配シナリオ：保守（%）", value=float(goals["scenario_growth_low"]),
+                          min_value=0.0, step=0.5, format="%.1f", key="scenario_low")
+    mid = s2.number_input("増配シナリオ：標準（%）", value=float(goals["scenario_growth_mid"]),
+                          min_value=0.0, step=0.5, format="%.1f", key="scenario_mid")
+    high = s3.number_input("増配シナリオ：強気（%）", value=float(goals["scenario_growth_high"]),
+                           min_value=0.0, step=0.5, format="%.1f", key="scenario_high")
+
+    if st.button("目標・前提値を保存", key="save_goals"):
         ok, message = save_goals({
-            "goal_dividend_annual": float(annual),
-            "goal_dividend_monthly": float(monthly),
-            "goal_net_worth": float(net),
+            "target_age": float(target_age),
+            "goal_dividend_annual": float(dividend_annual),
+            "goal_dividend_monthly": float(dividend_monthly),
+            "goal_net_worth": float(net_worth),
+            "goal_withdrawal_monthly": float(withdrawal),
+            "goal_business_monthly": float(business),
+            "goal_labor_monthly": float(labor),
+            "assumed_purchase_yield": float(purchase_yield),
+            "assumed_index_return": float(index_return),
+            "assumed_index_monthly": float(index_monthly),
+            "scenario_growth_low": float(low),
+            "scenario_growth_mid": float(mid),
+            "scenario_growth_high": float(high),
         }, cfg)
         (st.success if ok else st.error)(message)
         # KPI帯はタブより前に描画済み。再実行しないと保存した目標が反映されない
@@ -1793,22 +2052,29 @@ def main() -> None:
     history_rows, _ = load_side_csv(HISTORY_STATE, HISTORY_PATH, HISTORY_CSV, dh.parse_csv)
     goals = load_goals(cfg)
 
-    # --- 共通KPI（タブの上に固定。どのタブにいても現在地が分かる）---
-    _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, goals)
+    income_rows, _ = load_side_csv(INCOME_STATE, INCOME_PATH, INCOME_CSV, inc.parse_csv)
+    plan = _plan_numbers(holdings, div_map, cash_rows, income_rows, goals, birth_date)
 
-    tabs = st.tabs(["概要", "配当", "資産・成績", "ポートフォリオ", "目標", "データ"])
+    # --- 共通KPI（タブの上に固定。どのタブにいても現在地が分かる）---
+    _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, goals, plan)
+
+    tabs = st.tabs(
+        ["概要", "配当", "インデックス", "収入計画", "資産・成績", "ポートフォリオ", "データ"]
+    )
     with tabs[0]:
         _render_overview_tab(holdings, div_map, cash_rows, snapshot_rows, goals, cfg)
     with tabs[1]:
-        _render_dividend_tab(holdings, div_map, months_map, history_rows, cfg)
+        _render_dividend_tab(holdings, div_map, months_map, history_rows, goals, plan, cfg)
     with tabs[2]:
-        _render_performance_tab(holdings, snapshot_rows, history_rows, cfg)
+        _render_index_tab(holdings, goals, plan, cfg)
     with tabs[3]:
-        _render_portfolio_tab(holdings, price_map, div_map, cash_rows, cfg)
+        _render_income_tab(income_rows, goals, plan, cfg)
     with tabs[4]:
-        _render_goals_tab(holdings, div_map, cash_rows, history_rows, goals, birth_date, cfg)
+        _render_performance_tab(holdings, snapshot_rows, history_rows, cfg)
     with tabs[5]:
-        _render_data_tab(rows, sha, cfg, cash_rows, history_rows, holdings, div_map)
+        _render_portfolio_tab(holdings, price_map, div_map, cash_rows, cfg)
+    with tabs[6]:
+        _render_data_tab(rows, sha, cfg, cash_rows, history_rows, income_rows, holdings, div_map)
 
 
 if __name__ == "__main__":

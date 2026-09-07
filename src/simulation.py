@@ -140,6 +140,50 @@ def project_dividend_cf(
     return points
 
 
+@dataclass(frozen=True)
+class WithdrawalPoint:
+    """取り崩し期間の1年分。"""
+
+    year: int          # 開始からの経過年（1始まり）
+    balance: float     # その年の期末残高（0未満にはしない）
+    withdrawn: float   # その年に取り崩した額（残高不足なら残っていた分だけ）
+
+
+def project_withdrawal(
+    start_value: float, annual_return: float, monthly_withdrawal: float, years: int
+) -> list[WithdrawalPoint]:
+    """取り崩し期の残高推移。毎月定額を引き、残りを年率で運用する前提。
+
+    定額取り崩しは「4%ルール」のような定率と違い、相場が悪い年に取り崩し比率が上がる。
+    枯渇しうるので、残高が尽きたらそこで打ち切る（マイナス残高は返さない）。
+    """
+    points: list[WithdrawalPoint] = []
+    balance = max(0.0, start_value)
+    monthly_rate = annual_return / 100.0 / MONTHS_PER_YEAR
+    for year in range(1, max(0, years) + 1):
+        withdrawn = 0.0
+        for _ in range(MONTHS_PER_YEAR):
+            take = min(monthly_withdrawal, balance)
+            balance -= take
+            withdrawn += take
+            balance *= 1.0 + monthly_rate
+        points.append(WithdrawalPoint(year=year, balance=max(0.0, balance), withdrawn=withdrawn))
+        if balance <= 0:
+            break
+    return points
+
+
+def depletion_age(
+    start_age: int, start_value: float, annual_return: float,
+    monthly_withdrawal: float, horizon_years: int = 60,
+) -> int | None:
+    """取り崩しで残高が尽きる年齢。期間内に尽きなければ None。"""
+    for point in project_withdrawal(start_value, annual_return, monthly_withdrawal, horizon_years):
+        if point.balance <= 0:
+            return start_age + point.year
+    return None
+
+
 def first_year_reaching(
     points: list[DividendPoint], monthly_target: float, pre_tax: bool = False
 ) -> int | None:

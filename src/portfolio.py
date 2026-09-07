@@ -60,6 +60,9 @@ class Holding:
     # 業種（東証33業種）。sector＝商品種別とは別軸。空欄は未分類として集計する
     industry: str = ""
     market: str = "us"
+    # 購入時点の年1株配当。購入時利回り（新規投資の効率）の分子。
+    # 未入力（0）の銘柄は購入時利回りの母数から外す＝増配後の値と混ぜない
+    div_at_purchase: float = 0.0
     purpose: str = ""
     source: str = ""
     # 口座区分（specific/nisa_old/nisa_tsumitate/nisa_growth）。配当の税率が変わるため、
@@ -119,6 +122,7 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
                 sector=_clean_str(row.get("sector"), "その他"),
                 industry=_clean_str(row.get("industry"), ""),
                 market=_resolve_market(row.get("market"), ticker),
+                div_at_purchase=_to_float(row.get("div_at_purchase"), 0.0),
                 purpose=_clean_str(row.get("purpose"), ""),
                 source=_clean_str(row.get("source"), ""),
                 account=_clean_str(row.get("account"), ""),
@@ -160,6 +164,17 @@ def _clean_str(value, default: str) -> str:
     if s == "" or s.lower() == "nan":
         return default
     return s
+
+
+def _to_float(value, default: float) -> float:
+    """CSV由来の値を数値化。空・NaN・不正はデフォルトへ（列を足しても古い行が壊れない）。"""
+    text = _clean_str(value, "")
+    if not text:
+        return default
+    try:
+        return float(text.replace(",", ""))
+    except ValueError:
+        return default
 
 
 def _resolve_market(value, ticker: str) -> str:

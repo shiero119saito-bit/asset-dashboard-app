@@ -100,6 +100,76 @@ def yield_on_market(holdings: list[Holding], div_map: dict[str, float]) -> float
     return total_annual_dividend(holdings, div_map, pre_tax=True) / market * 100.0
 
 
+def yield_at_purchase(holdings: list[Holding]) -> float | None:
+    """購入時利回り（%・額面）。購入時1株配当が入っている保有だけで加重平均する。
+
+    新規投資の効率を測る指標。増配で動く簿価利回り（yield_on_cost）とは別物で、
+    「いくらの利回りで買えているか」を見る。**未入力の銘柄は母数にも入れない**
+    ＝入力済みが1件も無ければ None（画面は「—」を出す）。
+    """
+    cost = sum(h.cost_value for h in holdings if h.div_at_purchase > 0)
+    if cost <= 0:
+        return None
+    annual = sum(h.div_at_purchase * h.shares for h in holdings if h.div_at_purchase > 0)
+    return annual / cost * 100.0
+
+
+def shortfall(target_annual: float, current_annual: float) -> float:
+    """目標に対する不足配当額。既に上回っていれば0（マイナスを返さない）。"""
+    return max(0.0, target_annual - current_annual)
+
+
+def required_investment(
+    shortfall_after_tax: float, purchase_yield_pct: float, tax_rate: float
+) -> float:
+    """不足配当を埋めるのに要る追加投資額。
+
+    **目標も不足も税抜（手取り）で扱う**ため、額面利回りのまま割ってはいけない。
+    手取り利回り＝想定購入時利回り ×(1−実効税率) で割る（税率20.315%なら約1.25倍の金額が要る）。
+
+    追加投資した分の将来増配は織り込まない＝**保守側（多めに要求）**。
+    利回りが0以下、または不足が0なら0を返す。
+    """
+    net_yield = purchase_yield_pct / 100.0 * (1.0 - tax_rate)
+    if shortfall_after_tax <= 0 or net_yield <= 0:
+        return 0.0
+    return shortfall_after_tax / net_yield
+
+
+def project_dividend(current_annual: float, growth_pct: float, years: int) -> float:
+    """増配だけで到達する将来の年間配当（追加投資なし）。years が0以下なら現在値。"""
+    if years <= 0:
+        return current_annual
+    return current_annual * (1.0 + growth_pct / 100.0) ** years
+
+
+def growth_scenarios(
+    current_annual: float,
+    target_annual: float,
+    years: int,
+    purchase_yield_pct: float,
+    tax_rate: float,
+    growth_rates: tuple[float, ...] = (0.0, 3.0, 5.0),
+) -> list[dict]:
+    """増配シナリオ別の「将来配当」と「必要追加投資額」。
+
+    増配率が高いほど必要投資額は小さくなる。その構造を見せるためのものだが、
+    **増配は保証されない**ので保守（0%）を基準に読むこと。
+    """
+    return [
+        {
+            "growth": rate,
+            "projected": project_dividend(current_annual, rate, years),
+            "shortfall": shortfall(target_annual, project_dividend(current_annual, rate, years)),
+            "required": required_investment(
+                shortfall(target_annual, project_dividend(current_annual, rate, years)),
+                purchase_yield_pct, tax_rate,
+            ),
+        }
+        for rate in growth_rates
+    ]
+
+
 def dividend_by_month(
     holdings: list[Holding],
     div_map: dict[str, float],
