@@ -213,6 +213,42 @@ def test_industries_constant_covers_data_values():
         assert h.industry == "" or h.industry in pf.INDUSTRIES
 
 
+# --- 円グラフの小スライス集約 ---
+
+
+def test_group_small_slices_merges_below_threshold():
+    """しきい値未満が複数あれば1つにまとめる。合計は変わらない。"""
+    values = {"情報・通信業": 40.0, "小売業": 30.0, "化学": 20.0,
+              "鉱業": 1.0, "空運業": 1.5, "保険業": 2.0, "鉄鋼": 5.5}
+    got = pf.group_small_slices(values, threshold_pct=2.5)
+    assert got == pytest.approx({
+        "情報・通信業": 40.0, "小売業": 30.0, "化学": 20.0, "鉄鋼": 5.5,
+        pf.OTHER_SLICE_LABEL: 4.5,
+    })
+    assert sum(got.values()) == pytest.approx(sum(values.values()))
+
+
+def test_group_small_slices_keeps_single_small_item_named():
+    """まとめる対象が1件だけなら「その他」に置き換えない（情報が減るだけのため）。"""
+    got = pf.group_small_slices({"A": 98.0, "鉱業": 2.0}, threshold_pct=2.5)
+    assert got == pytest.approx({"A": 98.0, "鉱業": 2.0})
+
+
+def test_group_small_slices_threshold_is_share_not_absolute():
+    """しきい値は全体比。金額のように単位が大きい値でも同じ比率で効く。"""
+    got = pf.group_small_slices({"A": 900000.0, "B": 90000.0, "C": 10000.0},
+                                threshold_pct=2.5)
+    assert set(got) == {"A", "B", "C"}  # C は 1% だが小さい側が1件のみ＝名前を残す
+    got2 = pf.group_small_slices({"A": 900000.0, "B": 90000.0,
+                                  "C": 5000.0, "D": 5000.0}, threshold_pct=2.5)
+    assert got2[pf.OTHER_SLICE_LABEL] == pytest.approx(10000.0)
+
+
+def test_group_small_slices_empty_or_zero_is_safe():
+    assert pf.group_small_slices({}) == {}
+    assert pf.group_small_slices({"A": 0.0, "B": 0.0}) == {"A": 0.0, "B": 0.0}
+
+
 # --- 用途フィルタ（配当画面の表示絞り込み）---
 
 

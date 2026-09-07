@@ -399,6 +399,29 @@ def _render_price_status(
     _render_price_refresh(cfg)
 
 
+def _pie(values: dict[str, float], name_label: str, title: str, group_small: bool = True):
+    """凡例ではなくスライスの外側に名前を出す円グラフ。
+
+    既定の凡例方式は、色と名前を目で突き合わせないとどのスライスか分からない。
+    小さいスライスは `group_small_slices` で1つにまとめる（ラベルの重なり防止）。
+    明細は必ず隣の表に出しているので、図は上位の把握に振り切る。
+    """
+    positive = {k: v for k, v in values.items() if v > 0}
+    shown = pf.group_small_slices(positive) if group_small else positive
+    df = pd.DataFrame({name_label: list(shown), "値": list(shown.values())})
+    fig = px.pie(df, names=name_label, values="値", title=title)
+    fig.update_traces(
+        textposition="outside",
+        # 既定は有効桁数で揃うため 8.06% と 16.8% が混在する。小数1桁に統一して読みやすくする
+        texttemplate="%{label}<br>%{percent:.1%}",
+        # 外側ラベルは自動で折り返されないため、はみ出しは automargin で吸収する
+        automargin=True,
+        hovertemplate="%{label}<br>%{percent}<extra></extra>",
+    )
+    fig.update_layout(showlegend=False, uniformtext_minsize=10, height=420)
+    return fig
+
+
 def _render_simple_allocation(
     axis: str, alloc: dict[str, float], label_map: dict[str, str], left, right,
     cfg: sg.StorageConfig | None = None,
@@ -412,9 +435,10 @@ def _render_simple_allocation(
         return
 
     labels = [label_map.get(k, k) for k in alloc]
-    pie_df = pd.DataFrame({axis: labels, "構成比": list(alloc.values())})
-    fig = px.pie(pie_df, names=axis, values="構成比", title="現在の構成比")
-    left.plotly_chart(fig, width="stretch")
+    left.plotly_chart(
+        _pie(dict(zip(labels, alloc.values())), axis, "現在の構成比"),
+        width="stretch",
+    )
 
     table_df = pd.DataFrame(
         {axis: labels, "現在%": [round(v, 1) for v in alloc.values()]}
@@ -897,8 +921,14 @@ def main() -> None:
                 "構成比": [alloc[ac] for ac in pf.ASSET_CLASSES],
             }
         )
-        fig = px.pie(pie_df, names="資産クラス", values="構成比", title="現在の構成比")
-        left.plotly_chart(fig, width="stretch")
+        # 資産クラスは4区分固定＝目標AAと突き合わせる軸なので、小さくてもまとめない
+        left.plotly_chart(
+            _pie(
+                {pf.ASSET_CLASS_LABELS[ac]: alloc[ac] for ac in pf.ASSET_CLASSES},
+                "資産クラス", "現在の構成比", group_small=False,
+            ),
+            width="stretch",
+        )
 
         drift_df = pd.DataFrame(
             {
@@ -996,15 +1026,21 @@ def main() -> None:
     industry_df = pd.DataFrame(
         {"業種": list(by_industry.keys()), "配当": [round(v) for v in by_industry.values()]}
     ).sort_values("配当", ascending=False)
-    s_col.caption(f"業種別 配当（{tax_mode}{scope_suffix}）")
+    s_col.plotly_chart(
+        _pie(by_industry, "業種", f"業種別 配当（{tax_mode}{scope_suffix}）"),
+        width="stretch",
+    )
+    # 図はしきい値未満をまとめるため、明細は表で全件見せる
     show_table(industry_df, s_col, order_key="cols_div_industry", cfg=cfg)
 
     by_mkt = dv.dividend_by_market(div_holdings, div_map, pre_tax=pre_tax)
-    mkt_df = pd.DataFrame(
-        {"市場": [MARKET_LABELS.get(k, k) for k in by_mkt], "配当": [round(v) for v in by_mkt.values()]}
+    m_col.plotly_chart(
+        _pie(
+            {MARKET_LABELS.get(k, k): v for k, v in by_mkt.items()},
+            "市場", f"日米別 配当{scope_suffix}", group_small=False,
+        ),
+        width="stretch",
     )
-    fig_mkt = px.pie(mkt_df, names="市場", values="配当", title=f"日米別 配当{scope_suffix}")
-    m_col.plotly_chart(fig_mkt, width="stretch")
 
     # --- 銘柄テーブル ---
     st.subheader("銘柄別")

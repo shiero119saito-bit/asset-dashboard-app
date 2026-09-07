@@ -252,6 +252,44 @@ def allocation_by_account(holdings: list[Holding]) -> dict[str, float]:
     return _allocation_by_key(holdings, lambda h: h.account or "specific")
 
 
+# 円グラフで小さすぎるスライスをまとめる既定しきい値（%）。これ未満はラベルが重なって
+# 読めなくなるため1つに集約する。集約後の表示名は OTHER_SLICE_LABEL
+SMALL_SLICE_THRESHOLD = 2.5
+OTHER_SLICE_LABEL = "その他"
+
+
+def group_small_slices(
+    values: dict[str, float],
+    threshold_pct: float = SMALL_SLICE_THRESHOLD,
+    other_label: str = OTHER_SLICE_LABEL,
+) -> dict[str, float]:
+    """円グラフ用に、全体比が threshold 未満のキーを1つへまとめる。
+
+    業種のようにキーが20を超える軸では、小さいスライスのラベルが重なって
+    「どれがどれか分からない」状態になる。明細は表側で見られるため、図は上位だけ残す。
+
+    まとめる対象が1件しかないときは、その名前のまま残す（「その他」に置き換えても
+    情報が減るだけで読みやすくならないため）。合計が0以下なら何もしない。
+    """
+    total = sum(v for v in values.values() if v > 0)
+    if total <= 0:
+        return dict(values)
+
+    kept: dict[str, float] = {}
+    small: dict[str, float] = {}
+    for key, value in values.items():
+        if 0 < value and value / total * 100.0 < threshold_pct:
+            small[key] = value
+        else:
+            kept[key] = value
+
+    if len(small) == 1:
+        kept.update(small)
+    elif small:
+        kept[other_label] = sum(small.values())
+    return kept
+
+
 def allocation_by_industry(holdings: list[Holding]) -> dict[str, float]:
     """業種別の評価額構成比（%）。空欄は「未分類」に寄せる。
 
