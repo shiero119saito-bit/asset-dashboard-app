@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cash as ca  # noqa: E402
 import dataio  # noqa: E402
+import fundprices as fp  # noqa: E402
 import portfolio as pf  # noqa: E402
 import prices as pr  # noqa: E402
 import snapshots as sn  # noqa: E402
@@ -74,6 +75,18 @@ def fetch_missing_dividends(rows: list[dict], div_map: dict[str, float]) -> dict
         return div_map
 
     fetched = pr.fetch_dividends(missing)
+    # 投資信託は yfinance に無いので、基準価額と同じ協会CSVから分配金を取る
+    funds = {
+        str(r.get("ticker", "")).strip(): (
+            str(r.get("isin", "")).strip(), str(r.get("assoc_fund_cd", "")).strip()
+        )
+        for r in rows
+        if str(r.get("ticker", "")).strip() not in div_map
+        and str(r.get("isin", "")).strip() not in ("", "nan")
+        and str(r.get("assoc_fund_cd", "")).strip() not in ("", "nan")
+    }
+    fund_divs = fp.fetch_annual_dividends(funds) if funds else {}
+
     us_tickers = {
         str(r.get("ticker", "")).strip() for r in rows
         if str(r.get("market", "")).strip() == "us"
@@ -83,7 +96,7 @@ def fetch_missing_dividends(rows: list[dict], div_map: dict[str, float]) -> dict
         if fx_rate is None:
             print("為替レートを取得できないため、米国銘柄の配当は記録しません。", file=sys.stderr)
         fetched = pr.convert_us_values_to_jpy(fetched, us_tickers, fx_rate)
-    return {**div_map, **fetched}
+    return {**div_map, **fund_divs, **fetched}
 
 
 def read_cash_local(path: str) -> list[dict]:

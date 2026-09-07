@@ -21,7 +21,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import date
+from datetime import date, timedelta
 
 CSV_URL = "https://toushin-lib.fwg.ne.jp/FdsWeb/FDST030000/csv-file-download"
 TIMEOUT_SECONDS = 20
@@ -31,6 +31,13 @@ ENCODING = "cp932"  # 協会CSVは Shift-JIS
 FUND_PRICE_UNIT = 10000.0
 
 _DATE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+
+# 協会CSVの列。分配金は決算日の行にだけ入り、他の日は空欄
+_NAV_COLUMN = 1
+_DIVIDEND_COLUMN = 3
+
+# 年間分配金とみなす遡り期間（決算が四半期なら4回分が入る）
+_TRAILING_DAYS = 365
 
 
 def parse_nav_csv(text: str) -> tuple[date, float] | None:
@@ -57,8 +64,38 @@ def parse_nav_csv(text: str) -> tuple[date, float] | None:
     return None
 
 
-def fetch_nav(isin: str, assoc_fund_cd: str) -> tuple[date, float] | None:
-    """1ファンドの最新 (日付, 1口あたり基準価額) を返す。取得不可なら None。"""
+def parse_annual_dividend_csv(text: str) -> float | None:
+    """協会CSV本文から**直近1年の分配金合計（1口あたり）**を返す。行が無ければ None。
+
+    投資信託は yfinance に存在しないため、分配金も同じCSVから取るしかない
+    （楽天・SCHD の分配金が丸ごと配当に計上されていなかった）。
+    分配金も基準価額と同じく**1万口あたり**で記載されるので1口あたりへ換算する。
+    """
+    entries: list[tuple[date, float]] = []
+    for row in csv.reader(io.StringIO(text)):
+        if len(row) <= _DIVIDEND_COLUMN:
+            continue
+        matched = _DATE.search(row[0].strip())
+        if not matched:
+            continue  # ヘッダ行・注記行
+        raw = row[_DIVIDEND_COLUMN].strip().replace(",", "")
+        try:
+            amount = float(raw) if raw else 0.0
+        except ValueError:
+            continue
+        year, month, day = (int(g) for g in matched.groups())
+        entries.append((date(year, month, day), amount))
+
+    if not entries:
+        return None
+    latest = max(day for day, _ in entries)
+    cutoff = latest - timedelta(days=_TRAILING_DAYS)
+    total = sum(amount for day, amount in entries if day > cutoff)
+    return total / FUND_PRICE_UNIT
+
+
+def fetch_fund_csv(isin: str, assoc_fund_cd: str) -> str | None:
+    """1ファンドの協会CSV本文を取得する。取得不可なら None。"""
     if not isin or not assoc_fund_cd:
         return None
     try:
@@ -73,10 +110,33 @@ def fetch_nav(isin: str, assoc_fund_cd: str) -> tuple[date, float] | None:
         )
         if res.status_code != 200 or not res.content:
             return None
-        return parse_nav_csv(res.content.decode(ENCODING, errors="replace"))
+        return res.content.decode(ENCODING, errors="replace")
     except Exception:
-        # 通信不可・想定外のレスポンス。呼び出し側は既存の price を残す
+        # 通信不可・想定外のレスポンス。呼び出し側は既存の値を残す
         return None
+
+
+def fetch_annual_dividends(funds: dict[str, tuple[str, str]]) -> dict[str, float]:
+    """{ticker: (isin, assoc_fund_cd)} から {ticker: 1口あたり年間分配金} を返す。
+
+    分配金が0のファンド（無分配型）はキーを省略しない＝0として返す。
+    取得自体に失敗したファンドはキーを省略する（`fetch_navs` と同じ約束）。
+    """
+    result: dict[str, float] = {}
+    for ticker, (isin, assoc) in funds.items():
+        text = fetch_fund_csv(isin, assoc)
+        if text is None:
+            continue
+        amount = parse_annual_dividend_csv(text)
+        if amount is not None:
+            result[ticker] = amount
+    return result
+
+
+def fetch_nav(isin: str, assoc_fund_cd: str) -> tuple[date, float] | None:
+    """1ファンドの最新 (日付, 1口あたり基準価額) を返す。取得不可なら None。"""
+    text = fetch_fund_csv(isin, assoc_fund_cd)
+    return parse_nav_csv(text) if text else None
 
 
 def fetch_navs(funds: dict[str, tuple[str, str]]) -> dict[str, float]:

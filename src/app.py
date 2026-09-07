@@ -19,6 +19,7 @@ import portfolio as pf
 import prices as pr
 import cash as ca
 import dividend_history as dh
+import fundprices as fp
 import pricing_update as pu
 import simulation as sm
 import snapshots as sn
@@ -88,6 +89,12 @@ def cached_prices(tickers: tuple[str, ...]) -> dict[str, float]:
 @st.cache_data(ttl=3600, show_spinner="配当を取得中…")
 def cached_dividends(tickers: tuple[str, ...]) -> dict[str, float]:
     return pr.fetch_dividends(list(tickers))
+
+
+@st.cache_data(ttl=3600, show_spinner="投資信託の分配金を取得中…")
+def cached_fund_dividends(funds: tuple[tuple[str, str, str], ...]) -> dict[str, float]:
+    """投資信託の年間分配金（1口あたり）。引数は (ticker, isin, 協会コード) の組。"""
+    return fp.fetch_annual_dividends({t: (isin, cd) for t, isin, cd in funds})
 
 
 @st.cache_data(ttl=3600, show_spinner="権利確定月を取得中…")
@@ -958,10 +965,23 @@ def _delta_text(change: tuple[float, float] | None, unit: str = "") -> str | Non
 
 # KPI帯のスタイル。Streamlit の st.metric は1画面に6項目を置く前提の余白ではないため、
 # 行間・ラベル・補足の縦寸法を自前で決める（枠は6枚のカードではなく帯全体に1つ）
-KPI_STYLE = """
+APP_STYLE = """
 <style>
+/* タイトルと副題を1行に並べる */
+.app-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+             margin: 0 0 10px; }
+/* h1 は Streamlit 側の見出し処理と競合するため span で組む */
+.app-title .name { font-size: 2.1rem; font-weight: 700; line-height: 1.2;
+                   letter-spacing: .01em; }
+.app-title .sub { font-size: 0.9rem; opacity: 0.6; }
+
+/* タブはスクロールしても操作できるよう上端に固定する（Streamlit のヘッダ分だけ下げる） */
 .kpi { padding: 2px 2px 4px; }
-.kpi-label { font-size: 0.78rem; opacity: 0.65; line-height: 1.2; margin-bottom: 1px; }
+/* 項目名は藍で立てる。数字の羅列から見出しを拾えるようにする */
+.kpi-label { font-size: 0.78rem; color: #35507e; font-weight: 600;
+             line-height: 1.2; margin-bottom: 1px; }
+.kpi-divider { border-left: 1px solid rgba(128,128,128,.28); padding-left: 12px; }
+.kpi-hr { border: 0; border-top: 1px solid rgba(128,128,128,.28); margin: 8px 0; }
 .kpi-main { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; line-height: 1.1; }
 .kpi-value { font-size: 1.65rem; font-weight: 600; letter-spacing: -0.01em;
              font-variant-numeric: tabular-nums; }
@@ -978,14 +998,19 @@ KPI_STYLE = """
   .kpi-side.up { color: #4bbd91; }
   .kpi-side.down { color: #e0798a; }
   .kpi-track > span { background: #d7a94a; }
+  .kpi-label { color: #7ea3dd; }
 }
 </style>
 """
 
 
 def _kpi_cell(column, label: str, value: str, side: str = "", tone: str = "",
-              subs: tuple[str, ...] = (), progress: float | None = None) -> None:
-    """KPI 1項目。主数字は円のフル桁、右横に補足（前月比・現在/目標）、下に薄い補足行。"""
+              subs: tuple[str, ...] = (), progress: float | None = None,
+              divider: bool = False) -> None:
+    """KPI 1項目。主数字は円のフル桁、右横に補足（前月比・現在/目標）、下に薄い補足行。
+
+    divider=True で左に区切り線を引く（2列目以降に付けて項目の境界を示す）。
+    """
     side_html = f'<span class="kpi-side {tone}">{side}</span>' if side else ""
     bar_html = ""
     if progress is not None:
@@ -993,7 +1018,8 @@ def _kpi_cell(column, label: str, value: str, side: str = "", tone: str = "",
         bar_html = f'<div class="kpi-track"><span style="width:{width:.1f}%"></span></div>'
     subs_html = "".join(f'<div class="kpi-sub">{text}</div>' for text in subs)
     column.markdown(
-        f'<div class="kpi"><div class="kpi-label">{label}</div>'
+        f'<div class="kpi{" kpi-divider" if divider else ""}">'
+        f'<div class="kpi-label">{label}</div>'
         f'<div class="kpi-main"><span class="kpi-value">{value}</span>{side_html}</div>'
         f'{bar_html}{subs_html}</div>',
         unsafe_allow_html=True,
@@ -1028,8 +1054,6 @@ def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, g
     dividend_progress = dataio.goal_progress(annual_after, goal_annual)
 
     change = sn.change_from_previous(snapshot_rows, "net_worth")
-    st.markdown(KPI_STYLE, unsafe_allow_html=True)
-
     with st.container(border=True):
         a1, a2, a3 = st.columns(3)
         _kpi_cell(
@@ -1043,15 +1067,16 @@ def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, g
         _kpi_cell(
             a2, "評価損益", yen(gain),
             side=f"{gain_rate:+.2f}%", tone=_tone(gain_rate),
-            subs=(f"元本：{yen_short(cost)}",),
+            subs=(f"元本：{yen_short(cost)}",), divider=True,
         )
         _kpi_cell(
             a3, "目標達成率（資産）", f"{asset_progress:.1f}%",
             side=f"{yen_short(total_assets)} / {yen_short(goal_net)}",
             progress=asset_progress / 100.0,
-            subs=(f"残り：{yen_short(max(0.0, goal_net - total_assets))}",),
+            subs=(f"残り：{yen_short(max(0.0, goal_net - total_assets))}",), divider=True,
         )
 
+        st.markdown('<hr class="kpi-hr">', unsafe_allow_html=True)
         b1, b2, b3 = st.columns(3)
         # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
         return_rate = (total_return / cost * 100) if cost else 0.0
@@ -1065,13 +1090,14 @@ def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, g
             subs=(
                 f"税抜：{yen_short(annual_after)}",
                 f"月平均（税抜）：{yen_short(annual_after / 12)}",
-            ),
+            ), divider=True,
         )
         _kpi_cell(
             b3, "目標達成率（配当）", f"{dividend_progress:.1f}%",
             side=f"{yen_short(annual_after)} / {yen_short(goal_annual)}",
             progress=dividend_progress / 100.0,
             subs=(f"残り：{yen_short(max(0.0, goal_annual - annual_after))}（税抜・年）",),
+            divider=True,
         )
 
 
@@ -1597,6 +1623,9 @@ def _render_goal_editor(cfg) -> None:
             "goal_net_worth": float(net),
         }, cfg)
         (st.success if ok else st.error)(message)
+        # KPI帯はタブより前に描画済み。再実行しないと保存した目標が反映されない
+        if ok:
+            st.rerun()
 
 
 def _render_history_editor(history_rows) -> None:
@@ -1659,8 +1688,12 @@ def main() -> None:
     # page_title はブラウザタブとスマホのホーム画面アイコン名になる。10〜12文字で
     # 切られるため、副題は入れず名前だけにする
     st.set_page_config(page_title="FIRE STATION", page_icon="🔥", layout="wide")
-    st.title("FIRE STATION")
-    st.caption("資産管理ダッシュボード")
+    st.markdown(APP_STYLE, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="app-title"><span class="name">FIRE STATION</span>'
+        '<span class="sub">資産管理ダッシュボード</span></div>',
+        unsafe_allow_html=True,
+    )
 
     cfg = storage_config()
     if VIEW_ORDERS_STATE not in st.session_state:
@@ -1720,6 +1753,18 @@ def main() -> None:
                 cached_dividends(tuple(missing)), us_tickers, fx_rate
             )
             div_map.update(fetched_div)
+        # 投資信託は yfinance に存在しないため分配金が丸ごと欠落する（楽天・SCHD で実害）。
+        # 基準価額と同じ協会CSVから直近1年の分配金を取る
+        funds = tuple(
+            (str(r["ticker"]).strip(), str(r.get("isin", "")).strip(),
+             str(r.get("assoc_fund_cd", "")).strip())
+            for r in rows
+            if str(r["ticker"]).strip() not in div_map
+            and str(r.get("isin", "")).strip() not in ("", "nan")
+            and str(r.get("assoc_fund_cd", "")).strip() not in ("", "nan")
+        )
+        if funds:
+            div_map.update(cached_fund_dividends(funds))
         months_map = cached_dividend_months(tuple(tickers))
 
     # --- 付随データ（現金・スナップショット・配当実績）---

@@ -6,6 +6,8 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest  # noqa: E402
+
 import fundprices as fp  # noqa: E402
 
 # 投資信託協会CSVの実物の形（Shift-JIS・1万口あたりの基準価額・日付昇順）
@@ -121,3 +123,46 @@ def test_fetch_navs_omits_failures(monkeypatch):
     _install(monkeypatch, _Multi())
     got = fp.fetch_navs({"良": ("GOOD", "1"), "駄": ("BAD", "2")})
     assert got == {"良": 3.7945}
+
+
+# --- 分配金（楽天・SCHD の分配金が配当に計上されていなかった件の回帰）---
+
+DIVIDEND_SAMPLE = (
+    "年月日,基準価額(円),純資産総額（百万円）,分配金,決算期\n"
+    "2025年09月10日,10500,1000,,\n"
+    "2025年08月25日,10400,1000,30,1\n"      # 1年より前＝含めない
+    "2025年12月25日,10600,1100,35,2\n"
+    "2026年03月25日,10800,1200,40,3\n"
+    "2026年06月25日,11000,1300,45,4\n"
+    "2026年09月04日,11200,1400,,\n"
+)
+
+
+def test_parse_annual_dividend_sums_trailing_year_per_unit():
+    """直近1年の分配金合計を1口あたりで返す（協会CSVは1万口あたり表記）。"""
+    got = fp.parse_annual_dividend_csv(DIVIDEND_SAMPLE)
+    assert got == pytest.approx((35 + 40 + 45) / 10000.0)
+
+
+def test_parse_annual_dividend_ignores_older_than_a_year():
+    """1年より前の決算は含めない（2025年08月25日の30円は対象外＝基準日2026-09-04の365日前より古い）。"""
+    got = fp.parse_annual_dividend_csv(DIVIDEND_SAMPLE)
+    assert got != pytest.approx((30 + 35 + 40 + 45) / 10000.0)
+
+
+def test_parse_annual_dividend_no_distribution_is_zero():
+    """無分配型は0を返す（キーを落とさない＝取得失敗と区別する）。"""
+    assert fp.parse_annual_dividend_csv(SAMPLE) == 0.0
+
+
+def test_parse_annual_dividend_empty_is_none():
+    assert fp.parse_annual_dividend_csv("") is None
+    assert fp.parse_annual_dividend_csv("年月日,基準価額(円)\n") is None
+
+
+def test_fetch_annual_dividends_skips_failed_funds(monkeypatch):
+    monkeypatch.setattr(fp, "fetch_fund_csv",
+                        lambda isin, cd: DIVIDEND_SAMPLE if isin == "OK" else None)
+    got = fp.fetch_annual_dividends({"A": ("OK", "1"), "B": ("NG", "2")})
+    assert set(got) == {"A"}
+    assert got["A"] == pytest.approx(0.012)
