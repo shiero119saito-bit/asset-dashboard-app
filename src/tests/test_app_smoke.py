@@ -38,6 +38,9 @@ class _Stub:
     def expander(self, label, **kw):
         return self  # with 構文で使うため self を返す（no-op の lambda では入れない）
 
+    def container(self, **kw):
+        return self  # KPIカード（border=True）も with 構文で使う
+
     def __enter__(self):
         return self
 
@@ -381,6 +384,16 @@ def test_yen_short_keeps_kpi_values_readable(monkeypatch):
 
 
 MAIN_TABS = ["概要", "配当", "資産・成績", "ポートフォリオ", "目標", "データ"]
+
+
+def test_kpi_values_are_full_yen(monkeypatch):
+    """主数字は円のフル桁で出す（万表記だと桁感が掴めない）。補足だけ万表記。"""
+    _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+    import app
+    assert app.yen(15_240_000) == "¥15,240,000"
+    assert app.yen_short(15_240_000) == "¥1,524万"
 
 
 def test_main_tabs_are_rendered(monkeypatch):

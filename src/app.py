@@ -956,44 +956,87 @@ def _delta_text(change: tuple[float, float] | None, unit: str = "") -> str | Non
     return f"{sign}{yen_short(abs(delta))}{unit}（{rate:+.1f}%）"
 
 
+def _kpi_card(column, label: str, value: str, delta: str | None = None,
+              subs: tuple[str, ...] = (), progress: float | None = None) -> None:
+    """KPI 1枚。枠線つきカードで区切り、主数字の下に補足を薄く小さく置く。
+
+    主数字は**円のフル桁**で出す（万表記だと桁感が掴めない）。1行3枚に抑えているため
+    ¥15,240,000 でも切れない。補足のほうは万表記＝比較しやすさを優先する。
+    """
+    with column.container(border=True):
+        st.metric(label, value, delta)
+        if progress is not None:
+            st.progress(min(max(progress, 0.0), 1.0))
+        for text in subs:
+            st.caption(text)
+
+
 def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, goals) -> None:
     """全タブ共通のKPI。ここは「現在値」だけを出し、分解は各タブでやる。
 
-    6項目を横一列に置く（スマホは Streamlit が自動で縦積みにする）。
+    3枚 × 2段。上段＝いまの資産、下段＝成果と目標。
     """
     market = pf.total_market(holdings)
+    cash_total = ca.total(cash_rows)
     total_assets = ca.net_worth(market, cash_rows)
     annual_pre = dv.total_annual_dividend(holdings, div_map, pre_tax=True)
     annual_after = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
     received_total = sum(dh.by_year(history_rows).values())
     gain = pf.total_gain(holdings)
     cost = pf.total_cost(holdings)
+    total_return = gain + received_total
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("総資産", yen_short(total_assets),
-              _delta_text(sn.change_from_previous(snapshot_rows, "net_worth")))
-    k1.caption(f"現金 {yen_short(ca.total(cash_rows))}")
-
-    k2.metric("運用資産", yen_short(market),
-              _delta_text(sn.change_from_previous(snapshot_rows, "total_market")))
-    k2.caption(f"運用比率 {ca.invested_ratio(market, cash_rows):.1f}%")
-
-    k3.metric("評価損益", yen_short(gain), f"{pf.total_gain_rate(holdings):+.2f}%")
-    k3.caption(f"投下元本 {yen_short(cost)}")
-
-    k4.metric("年間予想配当", yen_short(annual_pre))
-    k4.caption(f"税抜 {yen_short(annual_after)}")
-
-    # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
-    k5.metric("トータルリターン", yen_short(gain + received_total),
-              f"{(gain + received_total) / cost * 100:+.1f}%" if cost else None)
-    k5.caption("累計配当 " + (yen_short(received_total) if history_rows else "未記録"))
-
+    goal_net = goals["goal_net_worth"]
     goal_annual = goals["goal_dividend_annual"]
-    progress = dataio.goal_progress(annual_after, goal_annual)
-    k6.metric("目標達成率", f"{progress:.1f}%")
-    k6.progress(min(progress / 100.0, 1.0))
-    k6.caption(f"年間配当（税抜）{yen_short(goal_annual)}")
+    asset_progress = dataio.goal_progress(total_assets, goal_net)
+    dividend_progress = dataio.goal_progress(annual_after, goal_annual)
+
+    # --- 上段：いまの資産 ---
+    a1, a2, a3 = st.columns(3)
+    _kpi_card(
+        a1, "総資産", yen(total_assets),
+        _delta_text(sn.change_from_previous(snapshot_rows, "net_worth")),
+        subs=(
+            f"現金：{yen_short(cash_total)}（{ca.cash_ratio(market, cash_rows):.1f}%）",
+            f"運用：{yen_short(market)}（{ca.invested_ratio(market, cash_rows):.1f}%）",
+        ),
+    )
+    _kpi_card(
+        a2, "評価損益", yen(gain), f"{pf.total_gain_rate(holdings):+.2f}%",
+        subs=(f"元本：{yen_short(cost)}",),
+    )
+    _kpi_card(
+        a3, "目標達成率（資産）", f"{asset_progress:.1f}%",
+        progress=asset_progress / 100.0,
+        subs=(
+            f"目標：{yen_short(goal_net)}",
+            f"残り：{yen_short(max(0.0, goal_net - total_assets))}",
+        ),
+    )
+
+    # --- 下段：成果と目標 ---
+    b1, b2, b3 = st.columns(3)
+    # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
+    _kpi_card(
+        b1, "トータルリターン", yen(total_return),
+        f"{total_return / cost * 100:+.1f}%" if cost else None,
+        subs=("累計配当：" + (yen_short(received_total) if history_rows else "未記録"),),
+    )
+    _kpi_card(
+        b2, "年間予想配当", yen(annual_pre),
+        subs=(
+            f"税抜：{yen_short(annual_after)}",
+            f"月平均（税抜）：{yen_short(annual_after / 12)}",
+        ),
+    )
+    _kpi_card(
+        b3, "目標達成率（配当）", f"{dividend_progress:.1f}%",
+        progress=dividend_progress / 100.0,
+        subs=(
+            f"目標：年 {yen_short(goal_annual)}（税抜）",
+            f"残り：{yen_short(max(0.0, goal_annual - annual_after))}",
+        ),
+    )
 
 
 def _snapshot_notice(snapshot_rows) -> bool:
