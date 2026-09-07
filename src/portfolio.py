@@ -259,6 +259,18 @@ def merged_cost_per_share(group: list[Holding]) -> float:
     return sum(h.cost_value for h in group) / shares
 
 
+def filter_by_purpose(holdings: list[Holding], purposes) -> list[Holding]:
+    """保有目的（purpose）で保有を絞り込む。purposes が空なら全件返す。
+
+    配当画面で「配当目的の資産だけ」を見るための表示フィルタ。AA計算や税率には
+    影響しない＝純粋に対象集合を絞るだけ。値は大小文字・前後空白を無視して比較する。
+    """
+    if not purposes:
+        return list(holdings)
+    wanted = {str(p or "").strip().lower() for p in purposes}
+    return [h for h in holdings if str(h.purpose or "").strip().lower() in wanted]
+
+
 def jp_dividend_by_purpose(holdings: list[Holding]) -> dict[str, list[Holding]]:
     """日本高配当(jp_dividend)保有を purpose（dividend/yutai/未分類）で分類する。
 

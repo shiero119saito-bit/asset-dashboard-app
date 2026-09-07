@@ -33,6 +33,15 @@ SETTINGS_JSON = os.path.join(DATA_DIR, "user_settings.json")  # 生年月日（.
 PURPOSE_LABELS_BY_VALUE = {"dividend": "配当", "growth": "資産形成", "yutai": "優待"}
 PURPOSE_LABELS = {**PURPOSE_LABELS_BY_VALUE, "": "未分類"}
 SOURCE_LABELS = {"rakuten": "楽天", "sbi": "SBI", "": "手入力"}
+
+# 配当セクションの集計対象。値は purpose のフィルタ集合（空タプル＝絞り込みなし）。
+# 資産形成（インデックス）の配当が混ざると「配当目的の資産の利回り」が見えないため分ける。
+DIVIDEND_SCOPES = {
+    "全資産": (),
+    "配当目的のみ": ("dividend",),
+    "配当＋優待": ("dividend", "yutai"),
+}
+
 MARKET_LABELS = {"jp": "日本株", "us": "米国株"}
 
 # 口座区分。特定以外は配当の国内課税が非課税になる（米国株の源泉10%は残る）。
@@ -916,38 +925,60 @@ def main() -> None:
 
     # --- 配当 ---
     st.subheader("配当")
-    tax_mode = st.radio("表示", ["税込", "税抜"], horizontal=True, key="tax_mode")
+    f_col, t_col = st.columns([1, 1])
+    with f_col:
+        scope = st.radio(
+            "対象", list(DIVIDEND_SCOPES), horizontal=True, key="div_scope",
+            help="用途（purpose）で絞り込む。資産形成（インデックス）や優待の配当を除いた"
+                 "「配当目的の資産」だけの利回り・月別CFを見るためのもの",
+        )
+    with t_col:
+        tax_mode = st.radio("表示", ["税込", "税抜"], horizontal=True, key="tax_mode")
     pre_tax = tax_mode == "税込"
 
+    # 配当セクションだけの表示フィルタ。AA・銘柄別テーブルは全資産のまま（holdings を使う）
+    div_holdings = pf.filter_by_purpose(holdings, DIVIDEND_SCOPES[scope])
+    scope_suffix = "" if not DIVIDEND_SCOPES[scope] else f"・{scope}"
+    if not div_holdings:
+        st.info(f"「{scope}」に該当する保有がありません。保有データの編集で purpose 列を設定してください。")
+
     d1, d2, d3 = st.columns(3)
-    annual_div = dv.total_annual_dividend(holdings, div_map, pre_tax=pre_tax)
-    d1.metric(f"年間配当（{tax_mode}）", yen(annual_div))
-    d2.metric("取得額利回り", f"{dv.yield_on_cost(holdings, div_map):.2f}%")
-    d3.metric("評価額利回り", f"{dv.yield_on_market(holdings, div_map):.2f}%")
+    annual_div = dv.total_annual_dividend(div_holdings, div_map, pre_tax=pre_tax)
+    d1.metric(f"年間配当（{tax_mode}{scope_suffix}）", yen(annual_div))
+    d2.metric("取得額利回り", f"{dv.yield_on_cost(div_holdings, div_map):.2f}%")
+    d3.metric("評価額利回り", f"{dv.yield_on_market(div_holdings, div_map):.2f}%")
+    if DIVIDEND_SCOPES[scope]:
+        st.caption(
+            f"用途が「{scope}」の保有 {len(pf.group_by_ticker(div_holdings))} 銘柄のみで集計"
+            f"（全 {len(pf.group_by_ticker(holdings))} 銘柄中）。利回りの母数（取得額・評価額）も"
+            "同じ範囲に絞っているため、配当目的の資産だけの利回りが出る。"
+        )
     if not div_map:
         st.info("配当データがありません。holdings.csv の div_per_share を入力するか、時価取得をONにしてください。")
 
     # 権利確定月別
-    by_month = dv.dividend_by_month(holdings, div_map, months_map, pre_tax=pre_tax)
+    by_month = dv.dividend_by_month(div_holdings, div_map, months_map, pre_tax=pre_tax)
     month_labels = [f"{m}月" for m in range(1, 13)] + [dv.UNKNOWN_MONTH]
     month_values = [by_month[m] for m in range(1, 13)] + [by_month[dv.UNKNOWN_MONTH]]
     month_df = pd.DataFrame({"月": month_labels, "配当": [round(v) for v in month_values]})
-    fig_month = px.bar(month_df, x="月", y="配当", title=f"権利確定月別 配当（{tax_mode}）")
+    fig_month = px.bar(
+        month_df, x="月", y="配当", title=f"権利確定月別 配当（{tax_mode}{scope_suffix}）"
+    )
     st.plotly_chart(fig_month, width="stretch")
 
     # セクター別 / 日米別
     s_col, m_col = st.columns(2)
-    by_sector = dv.dividend_by_sector(holdings, div_map, pre_tax=pre_tax)
+    by_sector = dv.dividend_by_sector(div_holdings, div_map, pre_tax=pre_tax)
     sector_df = pd.DataFrame(
         {"セクター": list(by_sector.keys()), "配当": [round(v) for v in by_sector.values()]}
     ).sort_values("配当", ascending=False)
     show_table(sector_df, s_col)
 
-    by_mkt = dv.dividend_by_market(holdings, div_map, pre_tax=pre_tax)
+    by_mkt = dv.dividend_by_market(div_holdings, div_map, pre_tax=pre_tax)
     mkt_df = pd.DataFrame(
         {"市場": [MARKET_LABELS.get(k, k) for k in by_mkt], "配当": [round(v) for v in by_mkt.values()]}
     )
-    fig_mkt = px.pie(mkt_df, names="市場", values="配当", title="日米別 配当")
+    fig_mkt = px.pie(mkt_df, names="市場", values="配当", title=f"日米別 配当{scope_suffix}")
     m_col.plotly_chart(fig_mkt, width="stretch")
 
     # --- 銘柄テーブル ---

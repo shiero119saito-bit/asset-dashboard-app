@@ -160,6 +160,49 @@ def test_jp_dividend_by_purpose_groups_and_ignores_other_classes():
     assert all(h.ticker != "2559" for group in groups.values() for h in group)
 
 
+# --- 用途フィルタ（配当画面の表示絞り込み）---
+
+
+PURPOSE_ROWS = [
+    {"ticker": "1001", "name": "配当株", "asset_class": "jp_dividend", "shares": 10,
+     "cost_per_share": 100, "purpose": "dividend"},
+    {"ticker": "1002", "name": "優待株", "asset_class": "jp_dividend", "shares": 5,
+     "cost_per_share": 200, "purpose": " Yutai "},  # 前後空白・大文字も同一視する
+    {"ticker": "1003", "name": "未分類株", "asset_class": "jp_dividend", "shares": 1,
+     "cost_per_share": 300},
+    {"ticker": "2559", "name": "オルカン", "asset_class": "index", "shares": 100,
+     "cost_per_share": 200, "purpose": "growth"},
+]
+
+
+def test_filter_by_purpose_selects_only_matching():
+    holdings = pf.build_holdings(PURPOSE_ROWS, {})
+    got = pf.filter_by_purpose(holdings, ("dividend",))
+    assert [h.ticker for h in got] == ["1001"]
+    # asset_class は無視＝インデックスでも purpose が一致すれば残る
+    got = pf.filter_by_purpose(holdings, ("growth",))
+    assert [h.ticker for h in got] == ["2559"]
+
+
+def test_filter_by_purpose_accepts_multiple_and_normalizes():
+    holdings = pf.build_holdings(PURPOSE_ROWS, {})
+    got = pf.filter_by_purpose(holdings, ("dividend", "yutai"))
+    assert [h.ticker for h in got] == ["1001", "1002"]
+
+
+def test_filter_by_purpose_empty_selection_returns_all():
+    """絞り込みなし（全資産）は全件。元リストは変更しない。"""
+    holdings = pf.build_holdings(PURPOSE_ROWS, {})
+    got = pf.filter_by_purpose(holdings, ())
+    assert [h.ticker for h in got] == [h.ticker for h in holdings]
+    assert got is not holdings
+
+
+def test_filter_by_purpose_unknown_purpose_returns_empty():
+    holdings = pf.build_holdings(PURPOSE_ROWS, {})
+    assert pf.filter_by_purpose(holdings, ("nothing",)) == []
+
+
 # --- 口座区分（表示用の合算）---
 
 
