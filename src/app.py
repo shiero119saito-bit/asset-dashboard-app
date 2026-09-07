@@ -1,4 +1,4 @@
-"""保有資産 見える化ダッシュボード（Streamlit エントリ）。
+"""FIRE STATION（資産管理ダッシュボード・Streamlit エントリ）。
 
 実行: streamlit run 400_Asset-management/src/app.py
 データソース優先順：アップロードCSV → st.secrets[holdings] → data/holdings.csv → sample
@@ -1577,8 +1577,11 @@ def _render_snapshot_button(holdings, div_map, cash_rows) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="資産ダッシュボード", layout="wide")
-    st.title("保有資産 見える化ダッシュボード")
+    # page_title はブラウザタブとスマホのホーム画面アイコン名になる。10〜12文字で
+    # 切られるため、副題は入れず名前だけにする
+    st.set_page_config(page_title="FIRE STATION", page_icon="🔥", layout="wide")
+    st.title("FIRE STATION")
+    st.caption("資産管理ダッシュボード")
 
     cfg = storage_config()
     if VIEW_ORDERS_STATE not in st.session_state:

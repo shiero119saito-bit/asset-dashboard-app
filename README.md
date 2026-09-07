@@ -1,6 +1,8 @@
-# Asset Dashboard
+# FIRE STATION
 
-保有資産の見える化と配当管理を行う Streamlit アプリ。
+資産管理ダッシュボード。保有資産の見える化と配当管理を行う Streamlit アプリ。
+
+（repo 名 `asset-dashboard-app` は配信先の識別子で、アプリ名は FIRE STATION）
 
 ## 機能
 - 保有資産の見える化：評価額・含み損益・構成比・目標アセットアロケーションとのズレ
