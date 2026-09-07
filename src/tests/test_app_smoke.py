@@ -396,6 +396,19 @@ def test_kpi_values_are_full_yen(monkeypatch):
     assert app.yen_short(15_240_000) == "¥1,524万"
 
 
+def test_load_goals_fills_keys_added_later(monkeypatch):
+    """設定に項目が増えても落ちないこと。古い形の辞書がセッションに残る場合の回帰。"""
+    st_stub = _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+    import app
+    import dataio
+    st_stub.session_state[app.GOALS_STATE] = {"goal_net_worth": 25_000_000.0}
+    goals = app.load_goals(None)
+    assert goals["goal_net_worth"] == 25_000_000.0          # 保存済みの値は残る
+    assert set(goals) == set(dataio.DEFAULT_GOALS)          # 増えたキーは既定値で埋まる
+
+
 def test_main_tabs_are_rendered(monkeypatch):
     """6タブが作られること。構成を変えたらここが落ちる（意図した変更なら直す）。"""
     st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)

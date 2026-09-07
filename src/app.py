@@ -168,9 +168,14 @@ def save_side_csv(state_key: str, path: str, local_path: str, text: str, parser,
 
 
 def load_goals(cfg: sg.StorageConfig | None = None) -> dict[str, float]:
-    """目標額を読む。保存先 → ローカル → 既定値の順。"""
+    """目標・前提値を読む。保存先 → ローカル → 既定値の順。
+
+    **必ず既定値の上にマージして返す**。設定は後から項目が増えるため、古い保存内容や
+    セッションに残った古い形の辞書をそのまま返すと、増えたキーの参照で KeyError になる
+    （実際に `target_age` 追加時にクラウドで落ちた）。
+    """
     if GOALS_STATE in st.session_state:
-        return st.session_state[GOALS_STATE]
+        return {**dataio.DEFAULT_GOALS, **st.session_state[GOALS_STATE]}
     text, _ = sg.load(user_settings_config(cfg))
     if text is None:
         text = _read_local(SETTINGS_JSON)
