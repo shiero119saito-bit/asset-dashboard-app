@@ -197,7 +197,7 @@ def test_merge_inherits_classification_when_row_splits_by_account():
         "ticker": "オルカン", "name": "オルカン", "asset_class": "index", "shares": "100",
         "cost_per_share": "2.4", "sector": "投資信託", "market": "jp", "div_per_share": "",
         "purpose": "growth", "source": "rakuten", "account": "specific",
-        "isin": "JP90C000H1T1", "assoc_fund_cd": "0331418A",
+        "industry": "ETF・投信", "isin": "JP90C000H1T1", "assoc_fund_cd": "0331418A",
     }]
     imported = [
         {"ticker": "オルカン", "name": "オルカン", "shares": 60.0, "cost_per_share": 2.4,
@@ -214,6 +214,14 @@ def test_merge_inherits_classification_when_row_splits_by_account():
         assert row["asset_class"] == "index"
         assert row["purpose"] == "growth"
         assert row["sector"] == "投資信託"
+        # 業種も引き継ぐ。消えると業種別グラフで「未分類」に落ちる
+        assert row["industry"] == "ETF・投信"
+
+
+def test_industry_is_persisted_and_inherited_column():
+    """industry は保存列かつ引き継ぎ対象。片方でも漏れると業種が消える。"""
+    assert "industry" in dataio.HOLDINGS_COLUMNS
+    assert "industry" in dataio.META_COLUMNS
 
 
 def test_merge_treats_blank_account_as_specific():

@@ -160,6 +160,59 @@ def test_jp_dividend_by_purpose_groups_and_ignores_other_classes():
     assert all(h.ticker != "2559" for group in groups.values() for h in group)
 
 
+# --- 業種（東証33業種）---
+
+
+INDUSTRY_ROWS = [
+    {"ticker": "9432", "name": "NTT", "asset_class": "jp_dividend", "shares": 10,
+     "cost_per_share": 100, "industry": "情報・通信業"},
+    {"ticker": "9433", "name": "KDDI", "asset_class": "jp_dividend", "shares": 10,
+     "cost_per_share": 100, "industry": "情報・通信業"},
+    {"ticker": "8267", "name": "イオン", "asset_class": "jp_dividend", "shares": 10,
+     "cost_per_share": 100, "industry": "小売業"},
+    {"ticker": "9999", "name": "未設定株", "asset_class": "jp_dividend", "shares": 10,
+     "cost_per_share": 100},  # industry 欠損
+    {"ticker": "2559", "name": "オルカン", "asset_class": "index", "shares": 10,
+     "cost_per_share": 100, "industry": "ETF・投信"},
+]
+INDUSTRY_PRICES = {"9432": 100, "9433": 100, "8267": 100, "9999": 100, "2559": 600}
+
+
+def test_allocation_by_industry_percentages():
+    """全資産（ETF含む）で合計100%になる。同一業種は合算される。"""
+    holdings = pf.build_holdings(INDUSTRY_ROWS, INDUSTRY_PRICES)
+    alloc = pf.allocation_by_industry(holdings)  # 評価額 1000*4 + 6000 = 10000
+    assert alloc == pytest.approx({
+        "情報・通信業": 20.0, "小売業": 10.0, "未分類": 10.0, "ETF・投信": 60.0,
+    })
+    assert sum(alloc.values()) == pytest.approx(100.0)
+
+
+def test_allocation_by_industry_blank_goes_to_unclassified():
+    holdings = pf.build_holdings(INDUSTRY_ROWS, INDUSTRY_PRICES)
+    assert pf.INDUSTRY_UNCLASSIFIED in pf.allocation_by_industry(holdings)
+
+
+def test_allocation_by_industry_empty_portfolio_is_safe():
+    assert pf.allocation_by_industry([]) == {}
+
+
+def test_jp_stocks_only_excludes_funds_and_keeps_source():
+    holdings = pf.build_holdings(INDUSTRY_ROWS, INDUSTRY_PRICES)
+    jp = pf.jp_stocks_only(holdings)
+    assert [h.ticker for h in jp] == ["9432", "9433", "8267", "9999"]
+    # 絞り込み後も構成比は100%になる（母数が絞った側で再計算される）
+    assert sum(pf.allocation_by_industry(jp).values()) == pytest.approx(100.0)
+    assert len(holdings) == 5  # 元リストは変更しない
+
+
+def test_industries_constant_covers_data_values():
+    """CSVに入る値は INDUSTRIES に含まれる＝エディタの選択肢と集計がずれない。"""
+    holdings = pf.build_holdings(INDUSTRY_ROWS, INDUSTRY_PRICES)
+    for h in holdings:
+        assert h.industry == "" or h.industry in pf.INDUSTRIES
+
+
 # --- 用途フィルタ（配当画面の表示絞り込み）---
 
 

@@ -78,6 +78,39 @@ def test_dividend_by_sector(holdings):
     assert by_sector["REIT"] == pytest.approx(400)
 
 
+def test_dividend_by_industry_groups_and_handles_blank():
+    """業種別の年間配当。industry 未設定は「未分類」に寄せる。"""
+    rows = [
+        {"ticker": "9432", "name": "NTT", "asset_class": "jp_dividend", "shares": 100,
+         "cost_per_share": 150, "market": "jp", "industry": "情報・通信業"},
+        {"ticker": "9433", "name": "KDDI", "asset_class": "jp_dividend", "shares": 100,
+         "cost_per_share": 4000, "market": "jp", "industry": "情報・通信業"},
+        {"ticker": "8267", "name": "イオン", "asset_class": "jp_dividend", "shares": 100,
+         "cost_per_share": 3000, "market": "jp"},  # industry 欠損
+    ]
+    holdings = pf.build_holdings(rows, {})
+    div = {"9432": 5.0, "9433": 140.0, "8267": 40.0}
+    by_ind = dv.dividend_by_industry(holdings, div, pre_tax=True)
+    assert by_ind == pytest.approx({"情報・通信業": 14500.0, "未分類": 4000.0})
+
+
+def test_dividend_by_industry_after_tax_uses_account_rate():
+    """税抜集計では口座区分の税率が効く（NISAは国内課税0%）。"""
+    rows = [
+        {"ticker": "9432", "name": "NTT", "asset_class": "jp_dividend", "shares": 100,
+         "cost_per_share": 150, "market": "jp", "industry": "情報・通信業",
+         "account": "nisa_growth"},
+        {"ticker": "8306", "name": "三菱UFJ", "asset_class": "jp_dividend", "shares": 100,
+         "cost_per_share": 1000, "market": "jp", "industry": "銀行業",
+         "account": "specific"},
+    ]
+    holdings = pf.build_holdings(rows, {})
+    div = {"9432": 5.0, "8306": 60.0}
+    by_ind = dv.dividend_by_industry(holdings, div, pre_tax=False)
+    assert by_ind["情報・通信業"] == pytest.approx(500.0)  # 非課税
+    assert by_ind["銀行業"] == pytest.approx(6000.0 * (1 - dv.TAX_RATE["jp"]))
+
+
 def test_dividend_by_market(holdings):
     by_market = dv.dividend_by_market(holdings, DIV, pre_tax=True)
     assert by_market["jp"] == pytest.approx(900)  # 1489 500 + 1343 400

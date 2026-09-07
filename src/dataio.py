@@ -26,6 +26,9 @@ HOLDINGS_COLUMNS = (
     "shares",
     "cost_per_share",
     "sector",
+    # 業種（東証33業種）。sector（商品種別）とは別軸＝業種分散を見るための列。
+    # ETF・投信は「ETF・投信」、REITは「REIT」でまとめる（業種軸でも全資産が100%になる）
+    "industry",
     "market",
     "div_per_share",
     "purpose",
@@ -107,7 +110,8 @@ ACCOUNTS = (ACCOUNT_SPECIFIC, ACCOUNT_NISA_OLD, ACCOUNT_NISA_TSUMITATE, ACCOUNT_
 # 再取込で行が口座別に分割されたとき、分割前の行から引き継ぐ分類情報。
 # これが無いと purpose や isin（投信の基準価額取得に必要）が分割の瞬間に消える
 META_COLUMNS = (
-    "asset_class", "sector", "market", "div_per_share", "purpose", "isin", "assoc_fund_cd",
+    "asset_class", "sector", "industry", "market", "div_per_share", "purpose",
+    "isin", "assoc_fund_cd",
 )
 
 
@@ -155,13 +159,16 @@ def _default_metadata(name: str, hint: dict | None = None) -> dict:
     importerはこれらのキーを含まないため、hintを渡さない呼び出しは従来どおりの挙動になる。
 
     優待/高配当の別（purpose）は保有動機の主観情報のため対象外＝常に空欄。
+    業種（industry）はREITだけ確定できる。個別株は銘柄ごとの調査が要るため空欄＝未分類。
     """
     if any(marker in name for marker in REIT_NAME_MARKERS):
-        meta = {"asset_class": "reit", "sector": "REIT", "market": "jp", "div_per_share": "", "purpose": ""}
+        meta = {"asset_class": "reit", "sector": "REIT", "industry": "REIT",
+                "market": "jp", "div_per_share": "", "purpose": ""}
     else:
-        meta = {"asset_class": "jp_dividend", "sector": "個別株", "market": "jp", "div_per_share": "", "purpose": ""}
+        meta = {"asset_class": "jp_dividend", "sector": "個別株", "industry": "",
+                "market": "jp", "div_per_share": "", "purpose": ""}
     if hint:
-        for key in ("asset_class", "sector", "market"):
+        for key in ("asset_class", "sector", "industry", "market"):
             if hint.get(key):
                 meta[key] = hint[key]
     return meta

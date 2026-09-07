@@ -18,6 +18,21 @@ ASSET_CLASS_LABELS = {
     "reit": "REIT",
 }
 
+# 業種（東証33業種）。個別株の業種分散を見るための区分で、asset_class（戦略上の資産クラス）や
+# sector（商品種別）とは別軸。末尾2つは個別株でない保有の受け皿＝これにより業種軸でも
+# 全資産の構成比が100%になる。表示順もこの並びに従う。
+INDUSTRIES = (
+    "水産・農林業", "鉱業", "建設業", "食料品", "繊維製品", "パルプ・紙", "化学", "医薬品",
+    "石油・石炭製品", "ゴム製品", "ガラス・土石製品", "鉄鋼", "非鉄金属", "金属製品", "機械",
+    "電気機器", "輸送用機器", "精密機器", "その他製品", "電気・ガス業", "陸運業", "海運業",
+    "空運業", "倉庫・運輸関連業", "情報・通信業", "卸売業", "小売業", "銀行業",
+    "証券、商品先物取引業", "保険業", "その他金融業", "不動産業", "サービス業",
+    "ETF・投信", "REIT",
+)
+
+# 業種が空欄の保有をまとめる表示名（集計キー）
+INDUSTRY_UNCLASSIFIED = "未分類"
+
 # 目標アセットアロケーション（%）。運用方針に合わせて変更する。
 TARGET_ALLOCATION = {
     "index": 60.0,
@@ -31,7 +46,7 @@ TARGET_ALLOCATION = {
 class Holding:
     """保有1銘柄。cost_per_share・shares は取得時情報、price は現在値。
 
-    sector・market は配当/集計の切り口に使う静的メタ（CSV由来）。
+    sector・industry・market は配当/集計の切り口に使う静的メタ（CSV由来）。
     変動する配当額は Holding に持たせず、dividend モジュールで div_map を注入する。
     """
 
@@ -42,6 +57,8 @@ class Holding:
     cost_per_share: float
     price: float
     sector: str = "その他"
+    # 業種（東証33業種）。sector＝商品種別とは別軸。空欄は未分類として集計する
+    industry: str = ""
     market: str = "us"
     purpose: str = ""
     source: str = ""
@@ -100,6 +117,7 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
                 cost_per_share=cost_per_share,
                 price=price,
                 sector=_clean_str(row.get("sector"), "その他"),
+                industry=_clean_str(row.get("industry"), ""),
                 market=_resolve_market(row.get("market"), ticker),
                 purpose=_clean_str(row.get("purpose"), ""),
                 source=_clean_str(row.get("source"), ""),
@@ -232,6 +250,24 @@ def allocation_by_account(holdings: list[Holding]) -> dict[str, float]:
     空欄は特定口座として集計する（税計算と同じ扱いに揃える）。
     """
     return _allocation_by_key(holdings, lambda h: h.account or "specific")
+
+
+def allocation_by_industry(holdings: list[Holding]) -> dict[str, float]:
+    """業種別の評価額構成比（%）。空欄は「未分類」に寄せる。
+
+    ETF・投信/REIT も INDUSTRIES の受け皿カテゴリに入るため、全保有を渡せば合計100%になる。
+    個別株だけの業種分散を見たいときは jp_stocks_only で絞ってから渡す。
+    """
+    return _allocation_by_key(holdings, lambda h: h.industry or INDUSTRY_UNCLASSIFIED)
+
+
+def jp_stocks_only(holdings: list[Holding]) -> list[Holding]:
+    """日本個別株（asset_class == "jp_dividend"）だけに絞る。
+
+    業種分散はETF・投信を混ぜると「ETF・投信が大半」で終わってしまうため、
+    個別株だけの内訳を見るための絞り込み。元リストは変更しない。
+    """
+    return [h for h in holdings if h.asset_class == "jp_dividend"]
 
 
 def group_by_ticker(holdings: list[Holding]) -> dict[str, list[Holding]]:

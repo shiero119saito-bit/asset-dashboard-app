@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from portfolio import Holding
+from portfolio import INDUSTRY_UNCLASSIFIED, Holding
 
 # 税率（税抜配当の算出に使用）
 # jp = 国内課税 20.315%（所得税15.315%＋住民税5%）
@@ -146,6 +146,18 @@ def dividend_by_sector(
 ) -> dict[str, float]:
     """セクター別の年間配当。"""
     return _dividend_by_key(holdings, div_map, lambda h: h.sector, pre_tax)
+
+
+def dividend_by_industry(
+    holdings: list[Holding], div_map: dict[str, float], pre_tax: bool = True
+) -> dict[str, float]:
+    """業種（東証33業種）別の年間配当。空欄は「未分類」に寄せる。
+
+    どの業種から配当を受け取っているか＝配当の集中度を見るための切り口。
+    """
+    return _dividend_by_key(
+        holdings, div_map, lambda h: h.industry or INDUSTRY_UNCLASSIFIED, pre_tax
+    )
 
 
 def dividend_by_market(

@@ -475,6 +475,10 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
             "shares": st.column_config.NumberColumn("株数", min_value=0.0, format="%,d", step=1),
             "cost_per_share": st.column_config.NumberColumn("取得単価", min_value=0.0, format="%,.2f"),
             "sector": st.column_config.TextColumn("商品種別"),
+            "industry": st.column_config.SelectboxColumn(
+                "業種", options=[""] + list(pf.INDUSTRIES),
+                help="東証33業種。ETF・投信/REITは末尾の区分を選ぶ。空欄は未分類として集計",
+            ),
             "market": st.column_config.SelectboxColumn("上場市場", options=["jp", "us"]),
             "div_per_share": st.column_config.NumberColumn("1株配当", min_value=0.0, format="%,.2f"),
             "purpose": st.column_config.SelectboxColumn(
@@ -875,7 +879,7 @@ def main() -> None:
     # market 列は上場市場（投資対象地域ではない）。
     st.subheader("アセットアロケーション")
     axis = st.radio(
-        "集計軸", ["資産クラス", "商品種別", "上場市場", "口座区分"],
+        "集計軸", ["資産クラス", "業種", "商品種別", "上場市場", "口座区分"],
         horizontal=True, key="alloc_axis",
     )
     left, right = st.columns([1, 1])
@@ -901,6 +905,21 @@ def main() -> None:
             }
         )
         show_table(drift_df, right, order_key="cols_drift", cfg=cfg)
+    elif axis == "業種":
+        # ETF・投信が6割を占めるため、既定は個別株のみ＝業種分散が読み取れる状態にする
+        jp_only = st.checkbox(
+            "日本個別株のみ", value=True, key="alloc_industry_jp_only",
+            help="OFFにするとETF・投信/REITも「ETF・投信」「REIT」区分として合算し、全資産で100%になる",
+        )
+        target = pf.jp_stocks_only(holdings) if jp_only else holdings
+        _render_simple_allocation(
+            axis, pf.allocation_by_industry(target), {}, left, right, cfg
+        )
+        st.caption(
+            "東証33業種（holdings.csv の industry 列）。"
+            + (f"日本個別株 {len(pf.group_by_ticker(target))} 銘柄が対象。"
+               if jp_only else "ETF・投信は中身を業種に分解せず1区分として扱う。")
+        )
     elif axis == "商品種別":
         _render_simple_allocation(
             axis, pf.allocation_by_sector(holdings), {}, left, right, cfg
@@ -966,13 +985,15 @@ def main() -> None:
     )
     st.plotly_chart(fig_month, width="stretch")
 
-    # セクター別 / 日米別
+    # 業種別 / 日米別
+    # 商品種別（sector）の内訳はAA軸で見られるため、ここは業種＝配当の集中度を示す方に充てる
     s_col, m_col = st.columns(2)
-    by_sector = dv.dividend_by_sector(div_holdings, div_map, pre_tax=pre_tax)
-    sector_df = pd.DataFrame(
-        {"セクター": list(by_sector.keys()), "配当": [round(v) for v in by_sector.values()]}
+    by_industry = dv.dividend_by_industry(div_holdings, div_map, pre_tax=pre_tax)
+    industry_df = pd.DataFrame(
+        {"業種": list(by_industry.keys()), "配当": [round(v) for v in by_industry.values()]}
     ).sort_values("配当", ascending=False)
-    show_table(sector_df, s_col)
+    s_col.caption(f"業種別 配当（{tax_mode}{scope_suffix}）")
+    show_table(industry_df, s_col, order_key="cols_div_industry", cfg=cfg)
 
     by_mkt = dv.dividend_by_market(div_holdings, div_map, pre_tax=pre_tax)
     mkt_df = pd.DataFrame(
