@@ -976,6 +976,21 @@ APP_STYLE = """
 .app-title .sub { font-size: 0.9rem; opacity: 0.6; }
 
 /* タブはスクロールしても操作できるよう上端に固定する（Streamlit のヘッダ分だけ下げる） */
+/* タブはスクロールしても操作できるよう上端に貼り付ける。
+   実DOMは stTabs > div > div:first-child がタブ一覧で、その親（stTabs直下のdiv）が
+   タブ本文を含む高さを持つ。1階層ずれると sticky は無効になる（実測で確認）。
+   スクロール容器は section[data-testid="stMain"] なので top は0でよい。 */
+div[data-testid="stTabs"] > div > div:first-child {
+  /* top はヘッダ帯の高さ（実測60px）。0にするとヘッダの下に隠れる */
+  position: sticky; top: 3.75rem; z-index: 999;
+  background: #ffffff; padding-top: 2px;
+  border-bottom: 1px solid rgba(128,128,128,.25);
+}
+/* 入れ子のタブ（シミュレーション・用途別）は固定しない＝主タブと重なるため */
+div[data-testid="stTabs"] div[data-testid="stTabs"] > div > div:first-child {
+  position: static; background: transparent; border-bottom: 0;
+}
+
 .kpi { padding: 2px 2px 4px; }
 /* 項目名は藍で立てる。数字の羅列から見出しを拾えるようにする */
 .kpi-label { font-size: 0.78rem; color: #35507e; font-weight: 600;
@@ -999,6 +1014,11 @@ APP_STYLE = """
   .kpi-side.down { color: #e0798a; }
   .kpi-track > span { background: #d7a94a; }
   .kpi-label { color: #7ea3dd; }
+  /* Streamlit のダークテーマ既定色。--background-color は定義されていない（実測） */
+  div[data-testid="stTabs"] > div > div:first-child { background: #0e1117; }
+  div[data-testid="stTabs"] div[data-testid="stTabs"] > div > div:first-child {
+    background: transparent;
+  }
 }
 </style>
 """
