@@ -213,6 +213,57 @@ def test_industries_constant_covers_data_values():
         assert h.industry == "" or h.industry in pf.INDUSTRIES
 
 
+# --- リバランス（金額での不足・追加投資の配分）---
+
+
+REBALANCE_ROWS = [
+    {"ticker": "IDX", "name": "index", "asset_class": "index", "shares": 1, "cost_per_share": 1},
+    {"ticker": "JPD", "name": "jp", "asset_class": "jp_dividend", "shares": 1, "cost_per_share": 1},
+]
+# 評価額 index 600 / jp_dividend 400 = 合計1000。目標は index60 / us20 / jp15 / reit5
+REBALANCE_PRICES = {"IDX": 600, "JPD": 400}
+
+
+def test_rebalance_amounts_returns_yen_gap_per_class():
+    holdings = pf.build_holdings(REBALANCE_ROWS, REBALANCE_PRICES)
+    got = pf.rebalance_amounts(holdings)
+    assert got["index"]["current"] == pytest.approx(600.0)
+    assert got["index"]["diff"] == pytest.approx(0.0)       # 600 が目標どおり
+    assert got["us_dividend"]["diff"] == pytest.approx(200.0)   # 不足
+    assert got["jp_dividend"]["diff"] == pytest.approx(-250.0)  # 過剰（150目標に対し400）
+    assert got["reit"]["diff"] == pytest.approx(50.0)
+
+
+def test_rebalance_amounts_empty_portfolio_is_safe():
+    got = pf.rebalance_amounts([])
+    assert all(info["target"] == 0.0 and info["diff"] == 0.0 for info in got.values())
+
+
+def test_allocate_new_money_fills_shortages_in_proportion():
+    """不足（us200・reit50）に比例配分する。過剰なクラスには回さない。"""
+    holdings = pf.build_holdings(REBALANCE_ROWS, REBALANCE_PRICES)
+    plan = pf.allocate_new_money(holdings, 100.0)
+    assert plan["us_dividend"] == pytest.approx(80.0)
+    assert plan["reit"] == pytest.approx(20.0)
+    assert plan["jp_dividend"] == pytest.approx(0.0)  # 過剰なので買わない
+    assert sum(plan.values()) == pytest.approx(100.0)
+
+
+def test_allocate_new_money_beyond_shortage_follows_target_ratio():
+    """不足を埋めきった残りは目標配分どおりに積む。"""
+    holdings = pf.build_holdings(REBALANCE_ROWS, REBALANCE_PRICES)
+    plan = pf.allocate_new_money(holdings, 1250.0)  # 不足250＋余剰1000
+    assert plan["us_dividend"] == pytest.approx(200.0 + 1000 * 0.20)
+    assert plan["jp_dividend"] == pytest.approx(1000 * 0.15)
+    assert sum(plan.values()) == pytest.approx(1250.0)
+
+
+def test_allocate_new_money_zero_or_negative_is_zero():
+    holdings = pf.build_holdings(REBALANCE_ROWS, REBALANCE_PRICES)
+    assert set(pf.allocate_new_money(holdings, 0).values()) == {0.0}
+    assert set(pf.allocate_new_money(holdings, -100).values()) == {0.0}
+
+
 # --- 円グラフの小スライス集約 ---
 
 

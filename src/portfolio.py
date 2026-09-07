@@ -258,6 +258,63 @@ SMALL_SLICE_THRESHOLD = 2.5
 OTHER_SLICE_LABEL = "その他"
 
 
+def rebalance_amounts(
+    holdings: list[Holding],
+    target: dict[str, float] | None = None,
+) -> dict[str, dict[str, float]]:
+    """資産クラス別に「目標額・現在額・差額」を金額で返す。
+
+    `allocation_drift` は %のズレを返すが、買い増しの判断に要るのは**いくら足りないか**
+    （円）。目標額は現在の総評価額 × 目標配分で、売却は前提にしない。
+    差額は「目標 − 現在」＝ **負なら過剰・正なら不足**。
+    """
+    target = target or TARGET_ALLOCATION
+    market = total_market(holdings)
+    current = {ac: 0.0 for ac in ASSET_CLASSES}
+    for h in holdings:
+        if h.asset_class in current:
+            current[h.asset_class] += h.market_value
+    return {
+        ac: {
+            "target": market * target.get(ac, 0.0) / 100.0,
+            "current": current[ac],
+            "diff": market * target.get(ac, 0.0) / 100.0 - current[ac],
+        }
+        for ac in ASSET_CLASSES
+    }
+
+
+def allocate_new_money(
+    holdings: list[Holding],
+    amount: float,
+    target: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """追加投資額を「不足している資産クラス」へ配分する（売らずに目標へ寄せる）。
+
+    不足額に比例して割り当てる。追加額が不足合計を上回る分は、目標配分どおりに配る
+    （不足が埋まった後は目標比率で積むのが自然なため）。不足が無い・金額0なら全て0。
+    """
+    target = target or TARGET_ALLOCATION
+    if amount <= 0:
+        return {ac: 0.0 for ac in ASSET_CLASSES}
+
+    shortages = {
+        ac: max(0.0, info["diff"]) for ac, info in rebalance_amounts(holdings, target).items()
+    }
+    total_short = sum(shortages.values())
+    if total_short <= 0:
+        return {ac: amount * target.get(ac, 0.0) / 100.0 for ac in ASSET_CLASSES}
+
+    filling = min(amount, total_short)
+    plan = {ac: filling * short / total_short for ac, short in shortages.items()}
+
+    surplus = amount - filling
+    if surplus > 0:
+        for ac in ASSET_CLASSES:
+            plan[ac] = plan.get(ac, 0.0) + surplus * target.get(ac, 0.0) / 100.0
+    return plan
+
+
 def group_small_slices(
     values: dict[str, float],
     threshold_pct: float = SMALL_SLICE_THRESHOLD,
