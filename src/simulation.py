@@ -21,6 +21,8 @@ DEFAULT_MONTHLY_CONTRIBUTION = 130_000.0  # 毎月の入金額
 DEFAULT_TARGET_AGE = 55  # 配当CF目標の到達年齢
 
 # 配当CF目標帯（月額・円）の初期値。グラフに目標帯として重ねる。
+# 到達判定の既定値。実際の判定は**画面で設定した配当目標**を渡して行う
+# （目標を月5万にしたのに「月6万到達」と出ていたため、呼び出し側から渡す形に変えた）
 TARGET_CF_MONTHLY_MIN = 60_000.0
 TARGET_CF_MONTHLY_MAX = 100_000.0
 

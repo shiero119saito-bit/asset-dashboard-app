@@ -734,6 +734,7 @@ def _render_birth_date_input(cfg: sg.StorageConfig | None = None) -> date | None
 def _render_dividend_cf_tab(
     current_annual_dividend: float, purchase_yield: float, years: int, target_age: int,
     tax_rate: float, growth_default: float = sm.DEFAULT_DIVIDEND_GROWTH,
+    target_monthly: float = sm.TARGET_CF_MONTHLY_MIN,
 ) -> None:
     """配当CFの推移：既存分は増配で伸び、新規買付分が利回り分の配当を上乗せする。
 
@@ -785,23 +786,24 @@ def _render_dividend_cf_tab(
     )
     last = points[-1]
     last_monthly = last.monthly_pre_tax if pre_tax else last.monthly_after_tax
-    reach_year = sm.first_year_reaching(points, sm.TARGET_CF_MONTHLY_MIN, pre_tax=pre_tax)
+    # 到達判定は**設定した配当目標**で行う（以前は月6万のハードコードだった）
+    reach_year = sm.first_year_reaching(points, target_monthly, pre_tax=pre_tax)
+    goal_label = f"月{yen_short(target_monthly)}到達"
 
     m1, m2, m3 = st.columns(3)
     m1.metric(f"{target_age}歳時点の月額配当（{tax_mode}）", yen(last_monthly))
     m2.metric("年間配当", yen(last.annual_pre_tax if pre_tax else last.annual_after_tax))
     if reach_year is None:
-        m3.metric("月6万到達", "期間内に未到達")
+        m3.metric(goal_label, "期間内に未到達")
     else:
-        m3.metric("月6万到達", f"{reach_year}年後")
+        m3.metric(goal_label, f"{reach_year}年後（{target_age - years + reach_year}歳）")
 
     values = [p.monthly_pre_tax if pre_tax else p.monthly_after_tax for p in points]
     df = pd.DataFrame({"経過年": [p.year for p in points], "月額配当": values})
     fig = px.line(df, x="経過年", y="月額配当", title=f"月額配当CFの推移（{tax_mode}）")
-    fig.add_hrect(
-        y0=sm.TARGET_CF_MONTHLY_MIN, y1=sm.TARGET_CF_MONTHLY_MAX,
-        fillcolor="green", opacity=0.12, line_width=0,
-        annotation_text="目標帯 月6〜10万", annotation_position="top left",
+    fig.add_hline(
+        y=target_monthly, line_dash="dash", line_color="#b8871f",
+        annotation_text=f"目標 月{yen_short(target_monthly)}", annotation_position="top left",
     )
     st.plotly_chart(fig, width="stretch")
 
@@ -1413,6 +1415,7 @@ def _render_dividend_plan(holdings, div_map, history_rows, goals, plan, cfg) -> 
         purchase_yield=assumed_yield,
         years=years, target_age=target_age, tax_rate=tax_rate,
         growth_default=goals["scenario_growth_mid"],
+        target_monthly=goal_annual / 12,
     )
 
     st.subheader("資産状況（参考）")

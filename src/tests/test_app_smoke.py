@@ -431,6 +431,24 @@ def test_monthly_dividend_goal_is_derived_from_annual(monkeypatch):
     assert plan["goal_monthly"] == 200_000.0
 
 
+def test_cf_target_uses_configured_goal(monkeypatch):
+    """配当CFの到達判定は設定した目標で行う（月6万のハードコードだった）。"""
+    st_stub = _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+    import app
+    import simulation as sim
+    labels = []
+    st_stub.metric = lambda label, *a, **kw: labels.append(label)
+    app._render_dividend_cf_tab(
+        current_annual_dividend=600_000, purchase_yield=4.0, years=12,
+        target_age=55, tax_rate=0.0, target_monthly=50_000,
+    )
+    assert any("月¥5.0万到達" in label for label in labels)
+    assert not any("月¥6.0万到達" in label for label in labels)
+    assert sim.TARGET_CF_MONTHLY_MIN == 60_000.0   # 既定値自体は据え置き
+
+
 def test_main_tabs_are_rendered(monkeypatch):
     """6タブが作られること。構成を変えたらここが落ちる（意図した変更なら直す）。"""
     st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
