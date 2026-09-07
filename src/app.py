@@ -17,8 +17,11 @@ import dataio
 import dividend as dv
 import portfolio as pf
 import prices as pr
+import cash as ca
+import dividend_history as dh
 import pricing_update as pu
 import simulation as sm
+import snapshots as sn
 import storage as sg
 import viewsettings as vs
 
@@ -103,6 +106,92 @@ def cached_price_history(tickers: tuple[str, ...], years: int):
     return pr.fetch_price_history(list(tickers), years)
 
 
+def _read_local(path: str) -> str | None:
+    """ローカルファイルを読む。無い・読めないなら None（保存先が未設定の環境向け）。"""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _side_config(cfg: sg.StorageConfig | None, path: str) -> sg.StorageConfig | None:
+    """保存先設定の path だけを差し替える（保有CSVと同じ repo の別ファイルを指す）。"""
+    return dataclasses.replace(cfg, path=path) if cfg else None
+
+
+def load_side_csv(state_key: str, path: str, local_path: str, parser):
+    """付随データ（現金・スナップショット・配当実績）を読む。(rows, sha) を返す。
+
+    **1セッションに1回だけ**読む。Streamlit は操作のたびに全再実行するため、
+    毎回 GitHub API を叩くと操作が重くなる（時価取得で同じ問題を踏んでいる）。
+    保存時は呼び出し側が session_state を更新する。
+    """
+    if state_key in st.session_state:
+        return st.session_state[state_key]
+
+    cfg = storage_config()
+    text, sha = sg.load(_side_config(cfg, path))
+    if text is None:
+        text, sha = _read_local(local_path), None
+    st.session_state[state_key] = (parser(text), sha)
+    return st.session_state[state_key]
+
+
+def save_side_csv(state_key: str, path: str, local_path: str, text: str, parser,
+                  message: str) -> tuple[bool, str]:
+    """付随データを保存する。保存先が無ければローカルへ書く（クラウドでは揮発）。"""
+    cfg = storage_config()
+    target = _side_config(cfg, path)
+    if target is not None:
+        _, sha = sg.load(target)
+        ok, note = sg.save(target, text, sha, message)
+        if ok:
+            st.session_state.pop(state_key, None)
+        return (ok, note)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(local_path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        st.session_state.pop(state_key, None)
+        return (True, f"保存した（{os.path.basename(local_path)}）")
+    except OSError:
+        return (False, "保存できなかった（書き込み不可の環境）。")
+
+
+def load_goals(cfg: sg.StorageConfig | None = None) -> dict[str, float]:
+    """目標額を読む。保存先 → ローカル → 既定値の順。"""
+    if GOALS_STATE in st.session_state:
+        return st.session_state[GOALS_STATE]
+    text, _ = sg.load(user_settings_config(cfg))
+    if text is None:
+        text = _read_local(SETTINGS_JSON)
+    st.session_state[GOALS_STATE] = dataio.parse_goals(text)
+    return st.session_state[GOALS_STATE]
+
+
+def save_goals(goals: dict[str, float], cfg: sg.StorageConfig | None = None) -> tuple[bool, str]:
+    """目標額を保存する（生年月日と同じ設定JSONへマージする）。"""
+    if cfg is not None:
+        target = user_settings_config(cfg)
+        existing, sha = sg.load(target)
+        ok, message = sg.save(
+            target, dataio.serialize_goals(goals, existing), sha, "update goals"
+        )
+        if ok:
+            st.session_state[GOALS_STATE] = dict(goals)
+        return (ok, "保存した" if ok else message)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        existing = _read_local(SETTINGS_JSON)
+        with open(SETTINGS_JSON, "w", encoding="utf-8") as f:
+            f.write(dataio.serialize_goals(goals, existing))
+        st.session_state[GOALS_STATE] = dict(goals)
+        return (True, "保存した")
+    except OSError:
+        return (False, "保存できなかった（書き込み不可の環境）。")
+
+
 def load_birth_date(cfg: sg.StorageConfig | None = None) -> date | None:
     """保存済みの生年月日を読む。未保存・読めない場合は None（＝未設定）。
 
@@ -127,13 +216,16 @@ def save_birth_date(birth: date, cfg: sg.StorageConfig | None = None) -> tuple[b
     """
     if cfg is not None:
         target = user_settings_config(cfg)
-        _, sha = sg.load(target)
-        ok, message = sg.save(target, dataio.serialize_birth_date(birth), sha, "update birth date")
+        existing, sha = sg.load(target)
+        ok, message = sg.save(
+            target, dataio.serialize_birth_date(birth, existing), sha, "update birth date"
+        )
         return (ok, f"保存した（{birth}）" if ok else message)
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
+        existing = _read_local(SETTINGS_JSON)
         with open(SETTINGS_JSON, "w", encoding="utf-8") as f:
-            f.write(dataio.serialize_birth_date(birth))
+            f.write(dataio.serialize_birth_date(birth, existing))
         return (True, f"保存した（{birth}）")
     except OSError:
         return (False, "保存できなかった（書き込み不可の環境）。今回のみ有効。")
@@ -192,12 +284,38 @@ def yen(v: float) -> str:
     return f"¥{v:,.0f}"
 
 
+def yen_short(v: float) -> str:
+    """KPIバー用の短い金額表記（万円）。
+
+    6項目を横一列に並べると、¥11,138,875 のような桁数は列幅に収まらず
+    「¥11,13…」と切れる（実際に切れた）。万円単位なら3〜5文字で収まる。
+    1万円未満は円のまま出す。
+    """
+    if abs(v) < 10000:
+        return f"¥{v:,.0f}"
+    man = v / 10000.0
+    digits = 0 if abs(man) >= 1000 else 1
+    return f"¥{man:,.{digits}f}万"
+
+
 # 設定類は保有データと同じ repo の別ファイルに置く。session_state もローカルファイルも
 # ブラウザを閉じる／コンテナが再起動すると消えるため、端末をまたいで残らない
 VIEW_SETTINGS_PATH = "view_settings.json"   # 列の並び順
-USER_SETTINGS_PATH = "user_settings.json"   # 生年月日（機微情報。repo は Private）
+USER_SETTINGS_PATH = "user_settings.json"   # 生年月日・目標額（機微情報。repo は Private）
+SNAPSHOTS_PATH = "snapshots.csv"            # 月次の資産スナップショット
+HISTORY_PATH = "dividend_history.csv"       # 受取配当の実績
+CASH_PATH = "cash.csv"                      # 現金・預金の残高
 VIEW_ORDERS_STATE = "view_orders"
 BIRTH_DATE_STATE = "birth_date"
+GOALS_STATE = "goals"
+CASH_STATE = "cash_rows"
+SNAPSHOT_STATE = "snapshot_rows"
+HISTORY_STATE = "dividend_history_rows"
+
+# 保存先が未設定の環境（ローカル実行）で使うファイル
+CASH_CSV = os.path.join(DATA_DIR, "cash.csv")
+SNAPSHOTS_CSV = os.path.join(DATA_DIR, "snapshots.csv")
+HISTORY_CSV = os.path.join(DATA_DIR, "dividend_history.csv")
 
 
 def view_settings_config(cfg: sg.StorageConfig | None) -> sg.StorageConfig | None:
@@ -829,6 +947,635 @@ def _render_backtest_tab() -> None:
     st.plotly_chart(fig, width="stretch")
 
 
+def _delta_text(change: tuple[float, float] | None, unit: str = "") -> str | None:
+    """スナップショットの差分を st.metric の delta 文字列にする。記録が無ければ None。"""
+    if change is None:
+        return None
+    delta, rate = change
+    sign = "+" if delta >= 0 else "-"
+    return f"{sign}{yen_short(abs(delta))}{unit}（{rate:+.1f}%）"
+
+
+def _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, goals) -> None:
+    """全タブ共通のKPI。ここは「現在値」だけを出し、分解は各タブでやる。
+
+    6項目を横一列に置く（スマホは Streamlit が自動で縦積みにする）。
+    """
+    market = pf.total_market(holdings)
+    total_assets = ca.net_worth(market, cash_rows)
+    annual_pre = dv.total_annual_dividend(holdings, div_map, pre_tax=True)
+    annual_after = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
+    received_total = sum(dh.by_year(history_rows).values())
+    gain = pf.total_gain(holdings)
+    cost = pf.total_cost(holdings)
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("総資産", yen_short(total_assets),
+              _delta_text(sn.change_from_previous(snapshot_rows, "net_worth")))
+    k1.caption(f"現金 {yen_short(ca.total(cash_rows))}")
+
+    k2.metric("運用資産", yen_short(market),
+              _delta_text(sn.change_from_previous(snapshot_rows, "total_market")))
+    k2.caption(f"運用比率 {ca.invested_ratio(market, cash_rows):.1f}%")
+
+    k3.metric("評価損益", yen_short(gain), f"{pf.total_gain_rate(holdings):+.2f}%")
+    k3.caption(f"投下元本 {yen_short(cost)}")
+
+    k4.metric("年間予想配当", yen_short(annual_pre))
+    k4.caption(f"税抜 {yen_short(annual_after)}")
+
+    # トータルリターン＝評価損益＋累計受取配当。株価が上がっただけではないことを見る
+    k5.metric("トータルリターン", yen_short(gain + received_total),
+              f"{(gain + received_total) / cost * 100:+.1f}%" if cost else None)
+    k5.caption("累計配当 " + (yen_short(received_total) if history_rows else "未記録"))
+
+    goal_annual = goals["goal_dividend_annual"]
+    progress = dataio.goal_progress(annual_after, goal_annual)
+    k6.metric("目標達成率", f"{progress:.1f}%")
+    k6.progress(min(progress / 100.0, 1.0))
+    k6.caption(f"年間配当（税抜）{yen_short(goal_annual)}")
+
+
+def _snapshot_notice(snapshot_rows) -> bool:
+    """記録が2件未満なら案内を出す。推移を描けるかどうかを返す。"""
+    if len(snapshot_rows) >= 2:
+        return True
+    st.info(
+        f"推移はスナップショットが2回分たまってから表示する（現在 {len(snapshot_rows)} 件）。"
+        "毎月1日に自動記録され、データタブの「今の状態を記録」でも増やせる。"
+    )
+    return False
+
+
+def _line_chart(snapshot_rows, columns: dict[str, str], title: str) -> None:
+    """スナップショットの複数列を1枚の折れ線にする。columns={列名: 表示名}。"""
+    labels, _ = sn.series(snapshot_rows, "date")
+    frame = {"日付": labels}
+    for column, name in columns.items():
+        frame[name] = sn.series(snapshot_rows, column)[1]
+    df = pd.DataFrame(frame)
+    fig = px.line(df, x="日付", y=list(columns.values()), title=title, markers=True)
+    fig.update_layout(legend_title_text="", yaxis_title="円")
+    st.plotly_chart(fig, width="stretch")
+
+
+# ---------------- 概要 ----------------
+
+
+def _render_overview_tab(holdings, div_map, cash_rows, snapshot_rows, goals, cfg) -> None:
+    """全体像だけを見る場所。深掘りは各タブへ送る。"""
+    market = pf.total_market(holdings)
+
+    st.subheader("総資産の推移")
+    if _snapshot_notice(snapshot_rows):
+        _line_chart(snapshot_rows, {"net_worth": "総資産", "total_cost": "投下元本"},
+                    "総資産と投下元本")
+
+    left, right = st.columns([1, 1])
+
+    with left:
+        st.subheader("資産構成")
+        alloc = pf.allocation_by_class(holdings)
+        total_assets = ca.net_worth(market, cash_rows)
+        composition = {"現金・預金": ca.total(cash_rows)}
+        for asset_class in pf.ASSET_CLASSES:
+            composition[pf.ASSET_CLASS_LABELS[asset_class]] = market * alloc[asset_class] / 100.0
+        comp_df = pd.DataFrame({
+            "区分": list(composition),
+            "金額": [round(v) for v in composition.values()],
+            "構成比%": [round(v / total_assets * 100, 1) if total_assets else 0.0
+                        for v in composition.values()],
+        })
+        show_table(comp_df, order_key="cols_composition", cfg=cfg)
+        if not cash_rows:
+            st.caption("現金が未入力のため、総資産＝運用資産で表示している（データタブで入力できる）。")
+
+    with right:
+        st.subheader("配当サマリー")
+        annual_pre = dv.total_annual_dividend(holdings, div_map, pre_tax=True)
+        annual_after = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
+        summary = pd.DataFrame({
+            "項目": ["年間予想（税込）", "年間予想（税抜）", "月平均（税抜）",
+                     "取得額利回り", "評価額利回り"],
+            "値": [yen(annual_pre), yen(annual_after), yen(annual_after / 12),
+                   f"{dv.yield_on_cost(holdings, div_map):.2f}%",
+                   f"{dv.yield_on_market(holdings, div_map):.2f}%"],
+        })
+        show_table(summary, order_key="cols_div_summary", cfg=cfg)
+
+        st.subheader("目標サマリー")
+        _render_goal_bars(holdings, div_map, cash_rows, goals, compact=True)
+
+    st.subheader("次に買うなら")
+    st.caption("目標AAとの差を金額で出す。売却は前提にせず、買い増しだけで寄せる。")
+    _render_rebalance(holdings, cfg)
+
+
+def _render_rebalance(holdings, cfg) -> None:
+    """目標AAとの差額と、追加投資額の配分案。"""
+    gaps = pf.rebalance_amounts(holdings)
+    extra = st.number_input(
+        "追加投資額（円）", value=0, min_value=0, step=10000, key="rebalance_extra",
+        help="入れると不足の大きい順に配分する。0のままなら差額だけを表示する",
+    )
+    plan = pf.allocate_new_money(holdings, float(extra)) if extra else {}
+    table = pd.DataFrame([
+        {
+            "資産クラス": pf.ASSET_CLASS_LABELS[ac],
+            "現在": round(gaps[ac]["current"]),
+            "目標": round(gaps[ac]["target"]),
+            "差額": round(gaps[ac]["diff"]),
+            "配分案": round(plan.get(ac, 0.0)),
+        }
+        for ac in pf.ASSET_CLASSES
+    ]).sort_values("差額", ascending=False)
+    show_table(table, order_key="cols_rebalance", cfg=cfg)
+    st.caption("差額がプラス＝不足（買い増し候補）、マイナス＝目標より多い。")
+
+
+# ---------------- 配当 ----------------
+
+
+def _render_dividend_tab(holdings, div_map, months_map, history_rows, cfg) -> None:
+    """予定（保有×1株配当）と実績（受取記録）の両方を見る。"""
+    view = st.radio("表示", ["予定", "実績"], horizontal=True, key="div_view")
+    if view == "実績":
+        _render_dividend_actuals(holdings, div_map, history_rows, cfg)
+        return
+
+    f_col, t_col = st.columns([1, 1])
+    with f_col:
+        scope = st.radio(
+            "対象", list(DIVIDEND_SCOPES), horizontal=True, key="div_scope",
+            help="用途（purpose）で絞り込む。資産形成（インデックス）や優待の配当を除いた"
+                 "「配当目的の資産」だけの利回り・月別CFを見るためのもの",
+        )
+    with t_col:
+        tax_mode = st.radio("税", ["税込", "税抜"], horizontal=True, key="tax_mode")
+    pre_tax = tax_mode == "税込"
+
+    div_holdings = pf.filter_by_purpose(holdings, DIVIDEND_SCOPES[scope])
+    scope_suffix = "" if not DIVIDEND_SCOPES[scope] else f"・{scope}"
+    if not div_holdings:
+        st.info(f"「{scope}」に該当する保有がありません。データタブで用途を設定してください。")
+
+    d1, d2, d3, d4 = st.columns(4)
+    annual_div = dv.total_annual_dividend(div_holdings, div_map, pre_tax=pre_tax)
+    d1.metric(f"年間配当（{tax_mode}{scope_suffix}）", yen(annual_div))
+    d2.metric("月平均", yen(annual_div / 12))
+    d3.metric("取得額利回り", f"{dv.yield_on_cost(div_holdings, div_map):.2f}%")
+    d4.metric("評価額利回り", f"{dv.yield_on_market(div_holdings, div_map):.2f}%")
+    st.caption(
+        "取得額利回りが評価額利回りを上回る＝買った後に値上がりしている。下回るなら高値づかみ。"
+    )
+    if DIVIDEND_SCOPES[scope]:
+        st.caption(
+            f"用途が「{scope}」の保有 {len(pf.group_by_ticker(div_holdings))} 銘柄のみで集計"
+            f"（全 {len(pf.group_by_ticker(holdings))} 銘柄中）。利回りの母数（取得額・評価額）も"
+            "同じ範囲に絞っているため、配当目的の資産だけの利回りが出る。"
+        )
+    if not div_map:
+        st.info("配当データがありません。holdings.csv の div_per_share を入力するか、時価取得をONにしてください。")
+
+    by_month = dv.dividend_by_month(div_holdings, div_map, months_map, pre_tax=pre_tax)
+    month_labels = [f"{m}月" for m in range(1, 13)] + [dv.UNKNOWN_MONTH]
+    month_values = [by_month[m] for m in range(1, 13)] + [by_month[dv.UNKNOWN_MONTH]]
+    month_df = pd.DataFrame({"月": month_labels, "配当": [round(v) for v in month_values]})
+    st.plotly_chart(
+        px.bar(month_df, x="月", y="配当", title=f"権利確定月別 配当（{tax_mode}{scope_suffix}）"),
+        width="stretch",
+    )
+
+    s_col, m_col = st.columns(2)
+    by_industry = dv.dividend_by_industry(div_holdings, div_map, pre_tax=pre_tax)
+    industry_df = pd.DataFrame(
+        {"業種": list(by_industry.keys()), "配当": [round(v) for v in by_industry.values()]}
+    ).sort_values("配当", ascending=False)
+    s_col.plotly_chart(
+        _pie(by_industry, "業種", f"業種別 配当（{tax_mode}{scope_suffix}）"), width="stretch",
+    )
+    show_table(industry_df, s_col, order_key="cols_div_industry", cfg=cfg)
+
+    by_mkt = dv.dividend_by_market(div_holdings, div_map, pre_tax=pre_tax)
+    m_col.plotly_chart(
+        _pie({MARKET_LABELS.get(k, k): v for k, v in by_mkt.items()},
+             "市場", f"日米別 配当{scope_suffix}", group_small=False),
+        width="stretch",
+    )
+
+    st.subheader("配当の源泉（銘柄別）")
+    st.caption("上位に偏っていれば、その銘柄の減配が家計に直撃する。")
+    per_ticker = {
+        group[0].ticker: (group[0].name, sum(dv.holding_dividend(h, div_map, pre_tax) for h in group))
+        for group in pf.group_by_ticker(div_holdings).values()
+    }
+    total_div = sum(v for _, v in per_ticker.values())
+    source_df = pd.DataFrame([
+        {"銘柄": ticker, "名称": name, "年間配当": round(amount),
+         "構成比%": round(amount / total_div * 100, 1) if total_div else 0.0}
+        for ticker, (name, amount) in per_ticker.items()
+    ]).sort_values("年間配当", ascending=False)
+    show_table(source_df.head(15), order_key="cols_div_source", cfg=cfg)
+
+
+def _render_dividend_actuals(holdings, div_map, history_rows, cfg) -> None:
+    """受取実績。ここだけが「本当にいくら入ったか」を示す。"""
+    if not history_rows:
+        st.info(
+            "受取配当の記録がまだない。データタブの「配当実績」で入力するか、"
+            "同じ列を持つCSVを取り込むと、年別推移・実測増配率・予定比が出る。"
+        )
+        return
+
+    this_year = str(date.today().year)
+    by_year = dh.by_year(history_rows)
+    planned_after_tax = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
+    progress = dh.progress_against_plan(history_rows, planned_after_tax, this_year)
+    # 当年は途中までしか受け取っていないため、増配率は当年を除いて算出する
+    closed_years = [r for r in history_rows if not str(r.get("date", "")).startswith(this_year)]
+    growth = dh.growth_rate(closed_years)
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric(f"{this_year}年の受取（手取り）", yen(by_year.get(this_year, 0.0)))
+    a2.metric("累計受取", yen(sum(by_year.values())))
+    a3.metric("予定に対する到達率", f"{progress:.1f}%" if progress is not None else "—")
+    a4.metric("実測増配率（年）", f"{growth:+.1f}%" if growth is not None else "—")
+    if growth is None:
+        st.caption("増配率は当年を除いた2年分以上の記録がたまると出る（途中の年を混ぜると過小評価になる）。")
+
+    year_df = pd.DataFrame({
+        "年": list(by_year), "受取（手取り）": [round(v) for v in by_year.values()],
+    }).sort_values("年")
+    st.plotly_chart(
+        px.bar(year_df, x="年", y="受取（手取り）", title="年間受取配当の推移（実績）"),
+        width="stretch",
+    )
+
+    left, right = st.columns(2)
+    by_month = dh.by_month(history_rows, year=this_year)
+    month_df = pd.DataFrame({
+        "月": list(by_month), "受取": [round(v) for v in by_month.values()],
+    }).sort_values("月")
+    left.plotly_chart(
+        px.bar(month_df, x="月", y="受取", title=f"{this_year}年 月別受取"), width="stretch",
+    )
+
+    industry_by_ticker = {h.ticker: h.industry for h in holdings}
+    by_industry = dh.by_industry(history_rows, industry_by_ticker, year=this_year)
+    right.plotly_chart(
+        _pie(by_industry, "業種", f"{this_year}年 業種別受取"), width="stretch",
+    )
+
+    st.subheader("受取明細")
+    show_table(pd.DataFrame(dh.sort_rows(history_rows)), order_key="cols_history", cfg=cfg)
+
+
+# ---------------- 資産・成績 ----------------
+
+
+def _render_performance_tab(holdings, snapshot_rows, history_rows, cfg) -> None:
+    """増えた理由を分解する場所。入金・値動き・配当を分けて見る。"""
+    cost = pf.total_cost(holdings)
+    gain = pf.total_gain(holdings)
+    received = sum(dh.by_year(history_rows).values())
+
+    st.subheader("トータルリターン")
+    st.caption("株価が上がったから増えた、だけではないことを見る。")
+    r1, r2, r3 = st.columns(3)
+    r1.metric("評価損益", yen(gain))
+    r2.metric("累計受取配当", yen(received) if history_rows else "未記録")
+    r3.metric("総合収益", yen(gain + received),
+              f"{(gain + received) / cost * 100:+.1f}%（元本比）" if cost else None)
+    st.caption("年率リターン（XIRR）は取得日を記録していないため出していない。")
+
+    st.subheader("直近の増減の内訳")
+    contributions = sn.deltas(snapshot_rows, "total_cost")
+    market_deltas = sn.deltas(snapshot_rows, "total_market")
+    if not contributions:
+        _snapshot_notice(snapshot_rows)
+    else:
+        when, contributed = contributions[-1]
+        _, market_delta = market_deltas[-1]
+        breakdown = pd.DataFrame({
+            "内訳": ["入金（投下元本の増加）", "値動き", "運用資産の増加"],
+            "金額": [round(contributed), round(market_delta - contributed), round(market_delta)],
+        })
+        show_table(breakdown, order_key="cols_breakdown", cfg=cfg)
+        st.caption(
+            f"{when} の記録と1つ前の記録の差。**入金は投下元本の増加で近似**している"
+            "（入出金の台帳を持っていないため）。売却した月は元本が減るのでマイナスになる。"
+            "受取配当は運用資産の外に入るため、上の「累計受取配当」で別に見る。"
+        )
+
+        st.subheader("入金力")
+        amounts = [amount for _, amount in contributions]
+        this_year = str(date.today().year)
+        year_total = sum(a for d, a in contributions if d.startswith(this_year))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("直近の入金", yen(amounts[-1]))
+        c2.metric(f"{this_year}年の入金", yen(year_total))
+        c3.metric("平均入金（記録期間）", yen(sum(amounts) / len(amounts)))
+
+    st.subheader("運用資産・元本・現金の推移")
+    if _snapshot_notice(snapshot_rows):
+        _line_chart(
+            snapshot_rows,
+            {"total_market": "運用資産", "total_cost": "投下元本", "cash": "現金"},
+            "評価額と元本の開きが含み益、現金の増減が待機資金の動き",
+        )
+
+
+# ---------------- ポートフォリオ ----------------
+
+
+def _render_portfolio_tab(holdings, price_map, div_map, cash_rows, cfg) -> None:
+    """リスクの偏りを見る場所。集中度と切り口別の構成比。"""
+    market = pf.total_market(holdings)
+    shares = pf.share_by_ticker(holdings)
+
+    st.subheader("集中リスク")
+    industry_alloc = pf.allocation_by_industry(pf.jp_stocks_only(holdings))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("銘柄数", f"{len(shares)}")
+    c2.metric("最大銘柄比率", f"{max(shares.values()):.1f}%" if shares else "—")
+    c3.metric("上位5銘柄", f"{pf.top_n_share(holdings, 5):.1f}%")
+    c4.metric("上位10銘柄", f"{pf.top_n_share(holdings, 10):.1f}%")
+    c1.caption(f"現金比率 {ca.cash_ratio(market, cash_rows):.1f}%")
+    c2.caption(
+        f"最大業種 {max(industry_alloc.values()):.1f}%" if industry_alloc else "業種未設定"
+    )
+
+    st.subheader("アセットアロケーション")
+    _render_allocation_axes(holdings, cfg)
+
+    st.subheader("銘柄別")
+    tax_mode = "税込"
+    table = pd.DataFrame([
+        _merged_row(group, market, price_map, div_map, True, tax_mode)
+        for group in pf.group_by_ticker(holdings).values()
+    ])
+    show_table(table, decimals={"損益率%": 2, "構成比%": 1}, order_key="cols_holdings", cfg=cfg)
+
+    st.subheader("日本個別株：高配当・優待")
+    by_purpose = pf.jp_dividend_by_purpose(holdings)
+    tab_dividend, tab_yutai, tab_unclassified = st.tabs(["高配当", "優待", "未分類"])
+    for tab, key in ((tab_dividend, "dividend"), (tab_yutai, "yutai"), (tab_unclassified, "")):
+        group = by_purpose.get(key, [])
+        with tab:
+            if not group:
+                st.caption("該当なし")
+                continue
+            purpose_df = pd.DataFrame([
+                {
+                    "銘柄": rows_of[0].ticker,
+                    "名称": rows_of[0].name,
+                    "口座": _account_summary(rows_of),
+                    "株数": sum(h.shares for h in rows_of),
+                    "取得単価": pf.merged_cost_per_share(rows_of),
+                    "評価額": round(sum(h.market_value for h in rows_of)),
+                    "含み損益": round(sum(h.gain for h in rows_of)),
+                }
+                for rows_of in pf.group_by_ticker(group).values()
+            ])
+            show_table(purpose_df, order_key=f"cols_purpose_{key or 'none'}", cfg=cfg)
+
+
+def _render_allocation_axes(holdings, cfg) -> None:
+    """集計軸を切り替えて構成比を見る（資産クラスだけ目標AAとのズレを出す）。
+
+    軸名はデータの実態に合わせている。sector 列は業種でなく商品種別、
+    market 列は上場市場（投資対象地域ではない）。
+    """
+    axis = st.radio(
+        "集計軸", ["資産クラス", "業種", "商品種別", "上場市場", "口座区分"],
+        horizontal=True, key="alloc_axis",
+    )
+    left, right = st.columns([1, 1])
+
+    if axis == "資産クラス":
+        alloc = pf.allocation_by_class(holdings)
+        drift = pf.allocation_drift(holdings)
+        # 資産クラスは4区分固定＝目標AAと突き合わせる軸なので、小さくてもまとめない
+        left.plotly_chart(
+            _pie({pf.ASSET_CLASS_LABELS[ac]: alloc[ac] for ac in pf.ASSET_CLASSES},
+                 "資産クラス", "現在の構成比", group_small=False),
+            width="stretch",
+        )
+        drift_df = pd.DataFrame({
+            "資産クラス": [pf.ASSET_CLASS_LABELS[ac] for ac in pf.ASSET_CLASSES],
+            "現在%": [round(alloc[ac], 1) for ac in pf.ASSET_CLASSES],
+            "目標%": [pf.TARGET_ALLOCATION[ac] for ac in pf.ASSET_CLASSES],
+            "ズレ": [round(drift[ac], 1) for ac in pf.ASSET_CLASSES],
+        })
+        show_table(drift_df, right, order_key="cols_drift", cfg=cfg)
+    elif axis == "業種":
+        # ETF・投信が6割を占めるため、既定は個別株のみ＝業種分散が読み取れる状態にする
+        jp_only = st.checkbox(
+            "日本個別株のみ", value=True, key="alloc_industry_jp_only",
+            help="OFFにするとETF・投信/REITも「ETF・投信」「REIT」区分として合算し、全資産で100%になる",
+        )
+        target = pf.jp_stocks_only(holdings) if jp_only else holdings
+        _render_simple_allocation(axis, pf.allocation_by_industry(target), {}, left, right, cfg)
+        st.caption(
+            "東証33業種（holdings.csv の industry 列）。"
+            + (f"日本個別株 {len(pf.group_by_ticker(target))} 銘柄が対象。"
+               if jp_only else "ETF・投信は中身を業種に分解せず1区分として扱う。")
+        )
+    elif axis == "商品種別":
+        _render_simple_allocation(axis, pf.allocation_by_sector(holdings), {}, left, right, cfg)
+        st.caption("holdings.csv の sector 列。業種（電気機器・銀行 等）ではなく商品種別。")
+    elif axis == "口座区分":
+        _render_simple_allocation(
+            axis, pf.allocation_by_account(holdings), ACCOUNT_LABELS, left, right, cfg)
+        st.caption(
+            "特定以外は配当の国内課税（20.315%）が非課税。"
+            "ただし米国株はNISAでも現地で10%が源泉徴収される（外国税額控除が使えず取り戻せない）。"
+        )
+    else:
+        _render_simple_allocation(
+            axis, pf.allocation_by_market_region(holdings), MARKET_LABELS, left, right, cfg)
+        st.caption(
+            "上場市場ベース。東証上場のオルカン・S&P500 ETF/投信は「日本株」に計上される"
+            "（投資対象地域ではない）。"
+        )
+
+
+# ---------------- 目標 ----------------
+
+
+def _render_goal_bars(holdings, div_map, cash_rows, goals, compact: bool = False) -> None:
+    """目標ごとの達成率。配当は税抜（手取り）で見る＝受け取れる額が目標だから。"""
+    annual_after = dv.total_annual_dividend(holdings, div_map, pre_tax=False)
+    total_assets = ca.net_worth(pf.total_market(holdings), cash_rows)
+    items = [
+        ("年間配当（税抜）", annual_after, goals["goal_dividend_annual"]),
+        ("月間配当（税抜）", annual_after / 12, goals["goal_dividend_monthly"]),
+        ("総資産", total_assets, goals["goal_net_worth"]),
+    ]
+    for label, current, goal in items:
+        progress = dataio.goal_progress(current, goal)
+        st.write(f"**{label}**　{yen(current)} / {yen(goal)}　（{progress:.1f}%）")
+        st.progress(min(progress / 100.0, 1.0))
+        if not compact:
+            remaining = max(0.0, goal - current)
+            st.caption(f"残り {yen(remaining)}")
+
+
+def _render_goals_tab(holdings, div_map, cash_rows, history_rows, goals, birth_date, cfg) -> None:
+    """目標と、そこへ届く見込み。前提値は画面で変えられる。"""
+    st.subheader("達成率")
+    _render_goal_bars(holdings, div_map, cash_rows, goals)
+    st.caption("目標額はデータタブで変更できる。")
+
+    st.subheader("シミュレーション")
+    market = pf.total_market(holdings)
+    target_age = st.number_input(
+        "目標年齢", value=sm.DEFAULT_TARGET_AGE, min_value=1, max_value=120, step=1
+    )
+    current_age = sm.age_at(birth_date, date.today())
+    years = sm.years_until_age(birth_date, date.today(), int(target_age))
+    st.caption(
+        f"現在 {current_age}歳 → {int(target_age)}歳まで残り {years}年。"
+        "以下の数値は入力した前提で計算した結果であり、将来の予測や推奨ではない。"
+    )
+    if years == 0:
+        st.info("目標年齢に到達済み。目標年齢を引き上げると将来推移を確認できる。")
+
+    # 実績があれば増配率の既定値に使える。無い間は入力値のまま
+    measured_growth = dh.growth_rate(
+        [r for r in history_rows if not str(r.get("date", "")).startswith(str(date.today().year))]
+    )
+    if measured_growth is not None:
+        st.caption(f"受取実績からの増配率は年 {measured_growth:+.1f}%。配当CFの前提値の参考にする。")
+
+    tab_acc, tab_cf, tab_bt = st.tabs(["つみたて", "配当CF", "バックテスト"])
+    with tab_acc:
+        _render_accumulation_tab(market, years)
+    with tab_cf:
+        _render_dividend_cf_tab(
+            current_annual_dividend=dv.total_annual_dividend(holdings, div_map, pre_tax=True),
+            current_yield=dv.yield_on_market(holdings, div_map),
+            years=years,
+            target_age=int(target_age),
+            tax_rate=dv.effective_tax_rate(holdings, div_map),
+        )
+    with tab_bt:
+        _render_backtest_tab()
+
+
+# ---------------- データ ----------------
+
+
+def _render_data_tab(rows, sha, cfg, cash_rows, history_rows, holdings, div_map) -> None:
+    """編集・取込・設定をまとめる。普段は開かないタブ。"""
+    _render_holdings_editor(rows, sha, cfg)
+    _render_cash_editor(cash_rows)
+    _render_goal_editor(cfg)
+    _render_history_editor(history_rows)
+    _render_snapshot_button(holdings, div_map, cash_rows)
+
+
+def _render_cash_editor(cash_rows) -> None:
+    """現金・預金の残高。ここが入ると総資産・現金比率・運用比率が出る。"""
+    st.subheader("現金・預金")
+    st.caption("待機資金の残高を口座ごとに入力する。証券口座の外にあるため自動取得はできない。")
+    editable = pd.DataFrame(cash_rows or [], columns=list(ca.CASH_COLUMNS))
+    editable["amount"] = pd.to_numeric(editable["amount"], errors="coerce")
+    edited = st.data_editor(
+        editable, width="stretch", hide_index=True, num_rows="dynamic", key="cash_editor",
+        column_config={
+            "name": st.column_config.TextColumn("口座・名称", required=True),
+            "amount": st.column_config.NumberColumn("残高", min_value=0.0, format="%,d"),
+            "note": st.column_config.TextColumn("メモ"),
+        },
+    )
+    text = ca.serialize_csv(edited.to_dict("records"))
+    left, right = st.columns([1, 2])
+    if left.button("現金を保存", key="save_cash"):
+        ok, message = save_side_csv(CASH_STATE, CASH_PATH, CASH_CSV, text, ca.parse_csv,
+                                    "update cash")
+        (st.success if ok else st.error)(message)
+        if ok:
+            st.rerun()
+    right.caption(f"合計 {yen(ca.total(edited.to_dict('records')))}")
+
+
+def _render_goal_editor(cfg) -> None:
+    """目標額の設定。達成率バーの分母になる。"""
+    st.subheader("目標の設定")
+    goals = load_goals(cfg)
+    g1, g2, g3 = st.columns(3)
+    annual = g1.number_input("年間配当（税抜）", value=int(goals["goal_dividend_annual"]),
+                             min_value=0, step=100000, key="goal_annual")
+    monthly = g2.number_input("月間配当（税抜）", value=int(goals["goal_dividend_monthly"]),
+                              min_value=0, step=10000, key="goal_monthly")
+    net = g3.number_input("総資産", value=int(goals["goal_net_worth"]),
+                          min_value=0, step=1000000, key="goal_net_worth")
+    if st.button("目標を保存", key="save_goals"):
+        ok, message = save_goals({
+            "goal_dividend_annual": float(annual),
+            "goal_dividend_monthly": float(monthly),
+            "goal_net_worth": float(net),
+        }, cfg)
+        (st.success if ok else st.error)(message)
+
+
+def _render_history_editor(history_rows) -> None:
+    """受取配当の実績。手入力と汎用CSV取込の両方を置く。"""
+    st.subheader("配当実績")
+    st.caption(
+        "実際に受け取った配当を記録する。証券会社の配当金明細CSVの形式対応は後日。"
+        "いまは手入力か、同じ列を持つCSVの取込で入れる。"
+    )
+    uploaded = st.file_uploader("配当実績CSVを取り込む（任意）", type="csv", key="history_upload")
+    rows = list(history_rows)
+    if uploaded is not None:
+        imported = dh.parse_csv(uploaded.getvalue().decode("utf-8-sig"))
+        rows = dh.merge(rows, imported)
+        st.info(f"{len(imported)}件を反映中。保存すると確定する（同じ受取は上書き＝二重計上しない）。")
+
+    editable = pd.DataFrame(rows or [], columns=list(dh.HISTORY_COLUMNS))
+    for column in ("gross", "tax", "net"):
+        editable[column] = pd.to_numeric(editable[column], errors="coerce")
+    edited = st.data_editor(
+        editable, width="stretch", hide_index=True, num_rows="dynamic", key="history_editor",
+        column_config={
+            "date": st.column_config.TextColumn("受取日", help="YYYY-MM-DD"),
+            "ticker": st.column_config.TextColumn("銘柄コード"),
+            "name": st.column_config.TextColumn("名称"),
+            "gross": st.column_config.NumberColumn("税引前", min_value=0.0, format="%,d"),
+            "tax": st.column_config.NumberColumn("税額", min_value=0.0, format="%,d"),
+            "net": st.column_config.NumberColumn("手取り", min_value=0.0, format="%,d",
+                                                 help="空欄なら税引前−税額で埋める"),
+            "account": st.column_config.SelectboxColumn("口座", options=[""] + list(dataio.ACCOUNTS)),
+            "source": st.column_config.TextColumn("証券会社"),
+            "note": st.column_config.TextColumn("メモ"),
+        },
+    )
+    if st.button("配当実績を保存", key="save_history"):
+        text = dh.serialize_csv(edited.to_dict("records"))
+        ok, message = save_side_csv(HISTORY_STATE, HISTORY_PATH, HISTORY_CSV, text, dh.parse_csv,
+                                    "update dividend history")
+        (st.success if ok else st.error)(message)
+        if ok:
+            st.rerun()
+
+
+def _render_snapshot_button(holdings, div_map, cash_rows) -> None:
+    """いまの状態を1行記録する。毎月1日の自動記録と同じ処理を手で叩く。"""
+    st.subheader("スナップショット")
+    st.caption("毎月1日に自動記録される。今すぐ残したいときはここから。同じ月なら上書きされる。")
+    if st.button("今の状態を記録", key="record_snapshot"):
+        record = sn.build_record(holdings, div_map, cash_total=ca.total(cash_rows))
+        current, _ = load_side_csv(SNAPSHOT_STATE, SNAPSHOTS_PATH, SNAPSHOTS_CSV, sn.parse_csv)
+        text = sn.serialize_csv(sn.upsert(current, record))
+        ok, message = save_side_csv(SNAPSHOT_STATE, SNAPSHOTS_PATH, SNAPSHOTS_CSV, text,
+                                    sn.parse_csv, f"record snapshot ({record['date']})")
+        (st.success if ok else st.error)(message)
+        if ok:
+            st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="資産ダッシュボード", layout="wide")
     st.title("保有資産 見える化ダッシュボード")
@@ -893,223 +1640,28 @@ def main() -> None:
             div_map.update(fetched_div)
         months_map = cached_dividend_months(tuple(tickers))
 
-    # --- サマリー ---
-    c1, c2, c3 = st.columns(3)
-    cost = pf.total_cost(holdings)
-    market = pf.total_market(holdings)
-    gain = pf.total_gain(holdings)
-    c1.metric("総取得額", yen(cost))
-    c2.metric("総評価額", yen(market))
-    c3.metric("含み損益", yen(gain), f"{pf.total_gain_rate(holdings):+.2f}%")
+    # --- 付随データ（現金・スナップショット・配当実績）---
+    cash_rows, _ = load_side_csv(CASH_STATE, CASH_PATH, CASH_CSV, ca.parse_csv)
+    snapshot_rows, _ = load_side_csv(SNAPSHOT_STATE, SNAPSHOTS_PATH, SNAPSHOTS_CSV, sn.parse_csv)
+    history_rows, _ = load_side_csv(HISTORY_STATE, HISTORY_PATH, HISTORY_CSV, dh.parse_csv)
+    goals = load_goals(cfg)
 
-    # --- AA 円グラフ vs 目標（軸切替：資産クラス／商品種別／上場市場） ---
-    # 軸名はデータの実態に合わせている。sector 列は業種でなく商品種別、
-    # market 列は上場市場（投資対象地域ではない）。
-    st.subheader("アセットアロケーション")
-    axis = st.radio(
-        "集計軸", ["資産クラス", "業種", "商品種別", "上場市場", "口座区分"],
-        horizontal=True, key="alloc_axis",
-    )
-    left, right = st.columns([1, 1])
+    # --- 共通KPI（タブの上に固定。どのタブにいても現在地が分かる）---
+    _render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, history_rows, goals)
 
-    if axis == "資産クラス":
-        alloc = pf.allocation_by_class(holdings)
-        drift = pf.allocation_drift(holdings)
-        pie_df = pd.DataFrame(
-            {
-                "資産クラス": [pf.ASSET_CLASS_LABELS[ac] for ac in pf.ASSET_CLASSES],
-                "構成比": [alloc[ac] for ac in pf.ASSET_CLASSES],
-            }
-        )
-        # 資産クラスは4区分固定＝目標AAと突き合わせる軸なので、小さくてもまとめない
-        left.plotly_chart(
-            _pie(
-                {pf.ASSET_CLASS_LABELS[ac]: alloc[ac] for ac in pf.ASSET_CLASSES},
-                "資産クラス", "現在の構成比", group_small=False,
-            ),
-            width="stretch",
-        )
-
-        drift_df = pd.DataFrame(
-            {
-                "資産クラス": [pf.ASSET_CLASS_LABELS[ac] for ac in pf.ASSET_CLASSES],
-                "現在%": [round(alloc[ac], 1) for ac in pf.ASSET_CLASSES],
-                "目標%": [pf.TARGET_ALLOCATION[ac] for ac in pf.ASSET_CLASSES],
-                "ズレ": [round(drift[ac], 1) for ac in pf.ASSET_CLASSES],
-            }
-        )
-        show_table(drift_df, right, order_key="cols_drift", cfg=cfg)
-    elif axis == "業種":
-        # ETF・投信が6割を占めるため、既定は個別株のみ＝業種分散が読み取れる状態にする
-        jp_only = st.checkbox(
-            "日本個別株のみ", value=True, key="alloc_industry_jp_only",
-            help="OFFにするとETF・投信/REITも「ETF・投信」「REIT」区分として合算し、全資産で100%になる",
-        )
-        target = pf.jp_stocks_only(holdings) if jp_only else holdings
-        _render_simple_allocation(
-            axis, pf.allocation_by_industry(target), {}, left, right, cfg
-        )
-        st.caption(
-            "東証33業種（holdings.csv の industry 列）。"
-            + (f"日本個別株 {len(pf.group_by_ticker(target))} 銘柄が対象。"
-               if jp_only else "ETF・投信は中身を業種に分解せず1区分として扱う。")
-        )
-    elif axis == "商品種別":
-        _render_simple_allocation(
-            axis, pf.allocation_by_sector(holdings), {}, left, right, cfg
-        )
-        st.caption("holdings.csv の sector 列。業種（電気機器・銀行 等）ではなく商品種別。")
-    elif axis == "口座区分":
-        _render_simple_allocation(
-            axis, pf.allocation_by_account(holdings), ACCOUNT_LABELS, left, right, cfg
-        )
-        st.caption(
-            "特定以外は配当の国内課税（20.315%）が非課税。"
-            "ただし米国株はNISAでも現地で10%が源泉徴収される（外国税額控除が使えず取り戻せない）。"
-        )
-    else:
-        _render_simple_allocation(
-            axis, pf.allocation_by_market_region(holdings), MARKET_LABELS, left, right, cfg
-        )
-        st.caption(
-            "上場市場ベース。東証上場のオルカン・S&P500 ETF/投信は「日本株」に計上される"
-            "（投資対象地域ではない）。"
-        )
-
-    # --- 配当 ---
-    st.subheader("配当")
-    f_col, t_col = st.columns([1, 1])
-    with f_col:
-        scope = st.radio(
-            "対象", list(DIVIDEND_SCOPES), horizontal=True, key="div_scope",
-            help="用途（purpose）で絞り込む。資産形成（インデックス）や優待の配当を除いた"
-                 "「配当目的の資産」だけの利回り・月別CFを見るためのもの",
-        )
-    with t_col:
-        tax_mode = st.radio("表示", ["税込", "税抜"], horizontal=True, key="tax_mode")
-    pre_tax = tax_mode == "税込"
-
-    # 配当セクションだけの表示フィルタ。AA・銘柄別テーブルは全資産のまま（holdings を使う）
-    div_holdings = pf.filter_by_purpose(holdings, DIVIDEND_SCOPES[scope])
-    scope_suffix = "" if not DIVIDEND_SCOPES[scope] else f"・{scope}"
-    if not div_holdings:
-        st.info(f"「{scope}」に該当する保有がありません。保有データの編集で purpose 列を設定してください。")
-
-    d1, d2, d3 = st.columns(3)
-    annual_div = dv.total_annual_dividend(div_holdings, div_map, pre_tax=pre_tax)
-    d1.metric(f"年間配当（{tax_mode}{scope_suffix}）", yen(annual_div))
-    d2.metric("取得額利回り", f"{dv.yield_on_cost(div_holdings, div_map):.2f}%")
-    d3.metric("評価額利回り", f"{dv.yield_on_market(div_holdings, div_map):.2f}%")
-    if DIVIDEND_SCOPES[scope]:
-        st.caption(
-            f"用途が「{scope}」の保有 {len(pf.group_by_ticker(div_holdings))} 銘柄のみで集計"
-            f"（全 {len(pf.group_by_ticker(holdings))} 銘柄中）。利回りの母数（取得額・評価額）も"
-            "同じ範囲に絞っているため、配当目的の資産だけの利回りが出る。"
-        )
-    if not div_map:
-        st.info("配当データがありません。holdings.csv の div_per_share を入力するか、時価取得をONにしてください。")
-
-    # 権利確定月別
-    by_month = dv.dividend_by_month(div_holdings, div_map, months_map, pre_tax=pre_tax)
-    month_labels = [f"{m}月" for m in range(1, 13)] + [dv.UNKNOWN_MONTH]
-    month_values = [by_month[m] for m in range(1, 13)] + [by_month[dv.UNKNOWN_MONTH]]
-    month_df = pd.DataFrame({"月": month_labels, "配当": [round(v) for v in month_values]})
-    fig_month = px.bar(
-        month_df, x="月", y="配当", title=f"権利確定月別 配当（{tax_mode}{scope_suffix}）"
-    )
-    st.plotly_chart(fig_month, width="stretch")
-
-    # 業種別 / 日米別
-    # 商品種別（sector）の内訳はAA軸で見られるため、ここは業種＝配当の集中度を示す方に充てる
-    s_col, m_col = st.columns(2)
-    by_industry = dv.dividend_by_industry(div_holdings, div_map, pre_tax=pre_tax)
-    industry_df = pd.DataFrame(
-        {"業種": list(by_industry.keys()), "配当": [round(v) for v in by_industry.values()]}
-    ).sort_values("配当", ascending=False)
-    s_col.plotly_chart(
-        _pie(by_industry, "業種", f"業種別 配当（{tax_mode}{scope_suffix}）"),
-        width="stretch",
-    )
-    # 図はしきい値未満をまとめるため、明細は表で全件見せる
-    show_table(industry_df, s_col, order_key="cols_div_industry", cfg=cfg)
-
-    by_mkt = dv.dividend_by_market(div_holdings, div_map, pre_tax=pre_tax)
-    m_col.plotly_chart(
-        _pie(
-            {MARKET_LABELS.get(k, k): v for k, v in by_mkt.items()},
-            "市場", f"日米別 配当{scope_suffix}", group_small=False,
-        ),
-        width="stretch",
-    )
-
-    # --- 銘柄テーブル ---
-    st.subheader("銘柄別")
-    table = pd.DataFrame(
-        [
-            _merged_row(group, market, price_map, div_map, pre_tax, tax_mode)
-            for group in pf.group_by_ticker(holdings).values()
-        ]
-    )
-    show_table(table, decimals={"損益率%": 2, "構成比%": 1},
-               order_key="cols_holdings", cfg=cfg)
-
-    # --- 日本個別株：高配当・優待 ---
-    st.subheader("日本個別株：高配当・優待")
-    by_purpose = pf.jp_dividend_by_purpose(holdings)
-    tab_dividend, tab_yutai, tab_unclassified = st.tabs(["高配当", "優待", "未分類"])
-    for tab, key in ((tab_dividend, "dividend"), (tab_yutai, "yutai"), (tab_unclassified, "")):
-        group = by_purpose.get(key, [])
-        with tab:
-            if not group:
-                st.caption("該当なし")
-                continue
-            # 銘柄別テーブルと同じく、口座で分かれた保有は1行にまとめて見せる
-            purpose_df = pd.DataFrame(
-                [
-                    {
-                        "銘柄": rows_of[0].ticker,
-                        "名称": rows_of[0].name,
-                        "口座": _account_summary(rows_of),
-                        "株数": sum(h.shares for h in rows_of),
-                        "取得単価": pf.merged_cost_per_share(rows_of),
-                        "評価額": round(sum(h.market_value for h in rows_of)),
-                        "含み損益": round(sum(h.gain for h in rows_of)),
-                    }
-                    for rows_of in pf.group_by_ticker(group).values()
-                ]
-            )
-            show_table(purpose_df, order_key=f"cols_purpose_{key or 'none'}", cfg=cfg)
-
-    # --- 保有データの編集（普段の更新はここで完結させる） ---
-    _render_holdings_editor(rows, sha, cfg)
-
-    # --- シミュレーション ---
-    st.subheader("シミュレーション")
-    target_age = st.number_input(
-        "目標年齢", value=sm.DEFAULT_TARGET_AGE, min_value=1, max_value=120, step=1
-    )
-    current_age = sm.age_at(birth_date, date.today())
-    years = sm.years_until_age(birth_date, date.today(), int(target_age))
-    st.caption(
-        f"現在 {current_age}歳 → {int(target_age)}歳まで残り {years}年。"
-        "以下の数値は入力した前提で計算した結果であり、将来の予測や推奨ではない。"
-    )
-    if years == 0:
-        st.info("目標年齢に到達済み。目標年齢を引き上げると将来推移を確認できる。")
-
-    tab_acc, tab_cf, tab_bt = st.tabs(["つみたて", "配当CF", "バックテスト"])
-    with tab_acc:
-        _render_accumulation_tab(market, years)
-    with tab_cf:
-        _render_dividend_cf_tab(
-            current_annual_dividend=dv.total_annual_dividend(holdings, div_map, pre_tax=True),
-            current_yield=dv.yield_on_market(holdings, div_map),
-            years=years,
-            target_age=int(target_age),
-            tax_rate=dv.effective_tax_rate(holdings, div_map),
-        )
-    with tab_bt:
-        _render_backtest_tab()
+    tabs = st.tabs(["概要", "配当", "資産・成績", "ポートフォリオ", "目標", "データ"])
+    with tabs[0]:
+        _render_overview_tab(holdings, div_map, cash_rows, snapshot_rows, goals, cfg)
+    with tabs[1]:
+        _render_dividend_tab(holdings, div_map, months_map, history_rows, cfg)
+    with tabs[2]:
+        _render_performance_tab(holdings, snapshot_rows, history_rows, cfg)
+    with tabs[3]:
+        _render_portfolio_tab(holdings, price_map, div_map, cash_rows, cfg)
+    with tabs[4]:
+        _render_goals_tab(holdings, div_map, cash_rows, history_rows, goals, birth_date, cfg)
+    with tabs[5]:
+        _render_data_tab(rows, sha, cfg, cash_rows, history_rows, holdings, div_map)
 
 
 if __name__ == "__main__":

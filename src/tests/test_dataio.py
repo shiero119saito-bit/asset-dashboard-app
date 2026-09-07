@@ -224,6 +224,44 @@ def test_industry_is_persisted_and_inherited_column():
     assert "industry" in dataio.META_COLUMNS
 
 
+# --- 個人設定（生年月日と目標額の同居）---
+
+
+def test_saving_birth_date_keeps_goals():
+    """生年月日の保存で目標額が消えないこと（同じJSONに同居している）。"""
+    existing = dataio.serialize_goals({"goal_net_worth": 25_000_000.0})
+    text = dataio.serialize_birth_date(date(1983, 8, 21), existing)
+    assert dataio.parse_birth_date(text) == date(1983, 8, 21)
+    assert dataio.parse_goals(text)["goal_net_worth"] == 25_000_000.0
+
+
+def test_saving_goals_keeps_birth_date():
+    existing = dataio.serialize_birth_date(date(1983, 8, 21))
+    text = dataio.serialize_goals({"goal_dividend_annual": 1_500_000.0}, existing)
+    assert dataio.parse_birth_date(text) == date(1983, 8, 21)
+    assert dataio.parse_goals(text)["goal_dividend_annual"] == 1_500_000.0
+
+
+def test_parse_goals_falls_back_to_defaults():
+    assert dataio.parse_goals(None) == dataio.DEFAULT_GOALS
+    assert dataio.parse_goals("{}") == dataio.DEFAULT_GOALS
+    assert dataio.parse_goals("壊れたJSON") == dataio.DEFAULT_GOALS
+
+
+def test_parse_goals_ignores_zero_and_broken_values():
+    """0や文字列を目標にすると達成率が壊れるため、既定値へ落とす。"""
+    text = '{"goal_net_worth": 0, "goal_dividend_annual": "なし"}'
+    goals = dataio.parse_goals(text)
+    assert goals["goal_net_worth"] == dataio.DEFAULT_GOALS["goal_net_worth"]
+    assert goals["goal_dividend_annual"] == dataio.DEFAULT_GOALS["goal_dividend_annual"]
+
+
+def test_goal_progress():
+    assert dataio.goal_progress(486_000, 1_000_000) == pytest.approx(48.6)
+    assert dataio.goal_progress(100, 0) == 0.0        # 目標未設定でも落ちない
+    assert dataio.goal_progress(120, 100) == pytest.approx(120.0)  # 超過は隠さない
+
+
 def test_merge_treats_blank_account_as_specific():
     """既存行の account が空欄でも、取込行の specific と同じ行として扱う。
 

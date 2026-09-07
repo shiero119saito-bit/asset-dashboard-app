@@ -19,10 +19,11 @@ sys.path.insert(0, SRC)
 class _Stub:
     """Streamlit ウィジェットの汎用スタブ。呼び出しを受けて既定値を返す。"""
 
-    def __init__(self, values=None, button_log=None):
+    def __init__(self, values=None, button_log=None, tab_log=None):
         self._values = values or {}
         # 描画されたボタンのラベル。「出るはずのボタンが出ない」を検出するために記録する
         self.button_log = button_log if button_log is not None else []
+        self.tab_log = tab_log if tab_log is not None else []
 
     # レイアウト系：自分自身（または複数）を返して連鎖呼び出しを成立させる
     def columns(self, spec, **kw):
@@ -30,6 +31,8 @@ class _Stub:
         return [self for _ in range(n)]
 
     def tabs(self, labels):
+        # どのタブが作られたかを検証できるよう記録する（構成の取りこぼし検出）
+        self.tab_log.append(list(labels))
         return [self for _ in labels]
 
     def expander(self, label, **kw):
@@ -118,7 +121,7 @@ class _StreamlitStub(_Stub):
 
     def __init__(self, use_live: bool, secrets: dict | None = None):
         super().__init__()
-        self.sidebar = _Stub(button_log=self.button_log)  # ログを共有する
+        self.sidebar = _Stub(button_log=self.button_log, tab_log=self.tab_log)  # ログを共有する
         self.secrets = _Secrets(secrets or {})
         self.column_config = _ColumnConfig()
         self.session_state: dict = {}  # 実物は dict ライク。get/pop がそのまま使える
@@ -359,6 +362,83 @@ def test_uploaded_csv_sha_is_none_without_storage(monkeypatch):
         "ticker,name,asset_class,shares,cost_per_share\n9432,NTT,jp_dividend,100,150\n"
     )
     assert sha is None
+
+
+def test_yen_short_keeps_kpi_values_readable(monkeypatch):
+    """KPIバーは6列に並ぶため、円のフル桁だと途中で切れる（実際に切れた）。"""
+    _install_streamlit_stub(monkeypatch, use_live=False)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage"):
+        sys.modules.pop(mod, None)
+    import app
+    assert app.yen_short(11_138_875) == "¥1,114万"
+    assert app.yen_short(4_181_867) == "¥418.2万"
+    assert app.yen_short(9_122) == "¥9,122"      # 1万円未満は円のまま
+    assert app.yen_short(0) == "¥0"
+    assert len(app.yen_short(123_456_789)) <= 10  # 桁が増えても短いまま
+
+
+# --- タブ構成とKPI（Phase 7 の再編）---
+
+
+MAIN_TABS = ["概要", "配当", "資産・成績", "ポートフォリオ", "目標", "データ"]
+
+
+def test_main_tabs_are_rendered(monkeypatch):
+    """6タブが作られること。構成を変えたらここが落ちる（意図した変更なら直す）。"""
+    st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
+    assert MAIN_TABS in st.tab_log
+
+
+def test_data_tab_has_every_editor(monkeypatch):
+    """データタブの保存ボタンが全部出ること（保存先が設定済みの場合）。"""
+    st = _run_main(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
+    for label in ("保存", "現金を保存", "目標を保存", "配当実績を保存", "今の状態を記録"):
+        assert label in st.button_log
+
+
+def test_runs_with_side_data_present(monkeypatch):
+    """現金・スナップショット・配当実績がある状態でも通ること（推移・実績の描画経路）。"""
+    st = _install_streamlit_stub(monkeypatch, use_live=False, secrets=STORAGE_SECRETS)
+    for mod in ("app", "portfolio", "dividend", "prices", "dataio", "simulation", "storage",
+                "snapshots", "cash", "dividend_history"):
+        sys.modules.pop(mod, None)
+
+    import prices as pr
+    import storage as sg
+    for name in ("fetch_prices", "fetch_dividends", "fetch_dividend_months"):
+        monkeypatch.setattr(pr, name, lambda tickers: {})
+    monkeypatch.setattr(pr, "fetch_fx_rate", lambda: None)
+    monkeypatch.setattr(sg, "save", lambda *a, **kw: (True, "保存しました。"))
+    monkeypatch.setattr(sg, "check", lambda cfg: (True, "接続できました。"))
+    monkeypatch.setattr(sg, "trigger_workflow", lambda *a, **kw: (True, "依頼しました。"))
+
+    snapshots_csv = (
+        "date,total_cost,total_market,gain,annual_dividend_pre_tax,annual_dividend_after_tax,"
+        "index_pct,us_dividend_pct,jp_dividend_pct,reit_pct,cash,net_worth\n"
+        "2026-08-01,6000000,9000000,3000000,400000,320000,50,20,25,5,1000000,10000000\n"
+        "2026-09-01,6100000,9500000,3400000,420000,336000,50,20,25,5,1200000,10700000\n"
+    )
+    cash_csv = "name,amount,note\n楽天銀行,1200000,生活防衛\n"
+    history_csv = ("date,ticker,name,gross,tax,net,account,source,note\n"
+                   "2025-03-28,9432,NTT,5000,1016,3984,specific,sbi,\n"
+                   "2026-03-27,9432,NTT,5500,0,5500,nisa_growth,sbi,\n")
+
+    def fake_load(cfg):
+        path = getattr(cfg, "path", "") if cfg else ""
+        if path == "snapshots.csv":
+            return (snapshots_csv, "sha")
+        if path == "cash.csv":
+            return (cash_csv, "sha")
+        if path == "dividend_history.csv":
+            return (history_csv, "sha")
+        return (None, None)
+
+    monkeypatch.setattr(sg, "load", fake_load)
+
+    import app
+    monkeypatch.setattr(app, "save_birth_date", lambda birth, cfg=None: (True, "保存した"))
+    app.main()  # 例外が出なければ成功
+    assert MAIN_TABS in st.tab_log
 
 
 def test_account_labels_cover_all_stored_values(monkeypatch):

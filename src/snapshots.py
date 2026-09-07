@@ -28,6 +28,10 @@ SNAPSHOT_COLUMNS = (
     "us_dividend_pct",
     "jp_dividend_pct",
     "reit_pct",
+    # 現金は証券口座の外にあるため保有データからは出せない。手入力の残高を一緒に記録して
+    # 総資産（net_worth）の推移を残す。cash 未入力なら 0＝運用資産と同じ値になる
+    "cash",
+    "net_worth",
 )
 
 # 構成比の列と資産クラスの対応
@@ -49,6 +53,7 @@ def build_record(
     holdings: list[pf.Holding],
     div_map: dict[str, float],
     on: date | None = None,
+    cash_total: float = 0.0,
 ) -> dict:
     """いまの保有から1行分のスナップショットを作る。
 
@@ -57,11 +62,14 @@ def build_record(
     """
     on = on or date.today()
     allocation = pf.allocation_by_class(holdings)
+    market = pf.total_market(holdings)
     record = {
         "date": on.isoformat(),
         "total_cost": round(pf.total_cost(holdings)),
-        "total_market": round(pf.total_market(holdings)),
+        "total_market": round(market),
         "gain": round(pf.total_gain(holdings)),
+        "cash": round(cash_total),
+        "net_worth": round(market + cash_total),
         "annual_dividend_pre_tax": round(
             dv.total_annual_dividend(holdings, div_map, pre_tax=True)
         ),
@@ -124,6 +132,19 @@ def series(rows: list[dict], column: str) -> tuple[list[str], list[float]]:
         [str(r.get("date", "")) for r in ordered],
         [_to_float(r.get(column)) for r in ordered],
     )
+
+
+def deltas(rows: list[dict], column: str) -> list[tuple[str, float]]:
+    """隣り合う記録の差分を (日付, 増減) で返す。記録が1件以下なら空。
+
+    入金額の近似（投下元本の増加）や、月ごとの資産増加の分解に使う。
+    **売却があると元本が減る**ため、増減がマイナスの月は「入金0＋売却」として読む。
+    """
+    ordered = sorted(rows, key=lambda r: str(r.get("date", "")))
+    return [
+        (str(curr.get("date", "")), _to_float(curr.get(column)) - _to_float(prev.get(column)))
+        for prev, curr in zip(ordered, ordered[1:])
+    ]
 
 
 def latest(rows: list[dict]) -> dict | None:

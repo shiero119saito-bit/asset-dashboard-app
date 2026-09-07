@@ -278,6 +278,62 @@ def parse_birth_date(text: str | None) -> date | None:
         return None
 
 
-def serialize_birth_date(birth: date) -> str:
-    """生年月日を設定JSON文字列にする（ISO 8601）。"""
-    return json.dumps({BIRTH_DATE_KEY: birth.isoformat()}, ensure_ascii=False, indent=2)
+def serialize_birth_date(birth: date, existing: str | None = None) -> str:
+    """生年月日を設定JSON文字列にする（ISO 8601）。
+
+    **既存の設定に上書きマージする**。同じファイルに目標額も入っているため、
+    生年月日だけを書き出すと目標が消える（1ファイル1設定の前提だった名残）。
+    """
+    settings = parse_settings(existing)
+    settings[BIRTH_DATE_KEY] = birth.isoformat()
+    return json.dumps(settings, ensure_ascii=False, indent=2)
+
+
+# --- 目標額。生年月日と同じ設定JSONに同居させる（保存先は .gitignore 済み） ---
+
+# 既定値は Shiero の戦略（55歳で月6〜10万のCF・資産形成の到達点）に合わせた初期値。
+# 画面から変更できる＝ここは「未設定のときの出発点」でしかない
+DEFAULT_GOALS = {
+    "goal_dividend_annual": 1_000_000.0,   # 年間配当（税抜）
+    "goal_net_worth": 20_000_000.0,        # 総資産
+    "goal_dividend_monthly": 100_000.0,    # 月間配当（税抜）
+}
+
+
+def parse_settings(text: str | None) -> dict:
+    """設定JSON文字列を辞書へ。未設定・壊れていれば空辞書（例外は投げない）。"""
+    if not text or not text.strip():
+        return {}
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def parse_goals(text: str | None) -> dict[str, float]:
+    """設定JSONから目標額を取り出す。欠けているキーは既定値で補う。"""
+    settings = parse_settings(text)
+    goals = dict(DEFAULT_GOALS)
+    for key in DEFAULT_GOALS:
+        try:
+            value = float(settings[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value > 0:
+            goals[key] = value
+    return goals
+
+
+def serialize_goals(goals: dict[str, float], existing: str | None = None) -> str:
+    """目標額を設定JSON文字列にする。既存の設定（生年月日等）は保つ。"""
+    settings = parse_settings(existing)
+    for key in DEFAULT_GOALS:
+        if key in goals:
+            settings[key] = float(goals[key])
+    return json.dumps(settings, ensure_ascii=False, indent=2)
+
+
+def goal_progress(current: float, goal: float) -> float:
+    """達成率（%）。目標が0以下なら0。100%を超えてもそのまま返す（超過は隠さない）。"""
+    return current / goal * 100.0 if goal > 0 else 0.0

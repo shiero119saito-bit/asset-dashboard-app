@@ -26,6 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import cash as ca  # noqa: E402
 import dataio  # noqa: E402
 import portfolio as pf  # noqa: E402
 import prices as pr  # noqa: E402
@@ -35,9 +36,11 @@ from refresh_prices import resolve_config  # noqa: E402  設定探索は1か所�
 
 HOLDINGS_CSV = os.path.join(ROOT, "data", "holdings.csv")
 SNAPSHOTS_CSV = os.path.join(ROOT, "data", "snapshots.csv")
+CASH_CSV = os.path.join(ROOT, "data", "cash.csv")
 
 # 保存先（private repo）でのファイル名。holdings.csv と同じ repo に置く
 SNAPSHOT_PATH = "snapshots.csv"
+CASH_PATH = "cash.csv"
 
 
 def dividend_map_from_csv(rows: list[dict]) -> dict[str, float]:
@@ -83,7 +86,16 @@ def fetch_missing_dividends(rows: list[dict], div_map: dict[str, float]) -> dict
     return {**div_map, **fetched}
 
 
-def build(rows: list[dict], on: date, fetch: bool = True) -> dict:
+def read_cash_local(path: str) -> list[dict]:
+    """ローカルの現金CSVを読む。無ければ空（現金未入力＝総資産＝運用資産）。"""
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8-sig") as f:
+        return ca.parse_csv(f.read())
+
+
+def build(rows: list[dict], on: date, fetch: bool = True,
+          cash_rows: list[dict] | None = None) -> dict:
     """保有行からスナップショット1行を作る（時価は price 列を使う）。
 
     時価に price 列を使うのは、時価更新（refresh_prices）の直後に走らせる前提のため。
@@ -93,19 +105,20 @@ def build(rows: list[dict], on: date, fetch: bool = True) -> dict:
     if fetch:
         div_map = fetch_missing_dividends(rows, div_map)
     holdings = pf.build_holdings(rows, {})
-    return sn.build_record(holdings, div_map, on=on)
+    return sn.build_record(holdings, div_map, on=on, cash_total=ca.total(cash_rows or []))
 
 
 def _describe(record: dict) -> str:
     return (
         f"{record['date']}：評価額 {int(record['total_market']):,}円 / "
         f"元本 {int(record['total_cost']):,}円 / 含み損益 {int(record['gain']):,}円 / "
-        f"年間配当（税抜）{int(record['annual_dividend_after_tax']):,}円"
+        f"年間配当（税抜）{int(record['annual_dividend_after_tax']):,}円 / "
+        f"現金 {int(record['cash']):,}円 → 総資産 {int(record['net_worth']):,}円"
     )
 
 
 def run_local(holdings_path: str, snapshots_path: str, on: date, dry_run: bool,
-              fetch: bool = True) -> int:
+              fetch: bool = True, cash_path: str = CASH_CSV) -> int:
     if not os.path.exists(holdings_path):
         print(f"holdings.csv が見つかりません：{holdings_path}", file=sys.stderr)
         return 1
@@ -115,7 +128,7 @@ def run_local(holdings_path: str, snapshots_path: str, on: date, dry_run: bool,
         print(f"holdings.csv が空です：{holdings_path}", file=sys.stderr)
         return 1
 
-    record = build(rows, on, fetch)
+    record = build(rows, on, fetch, read_cash_local(cash_path))
     print(_describe(record))
     if dry_run:
         print("--dry-run のため書き込みません。")
@@ -149,7 +162,8 @@ def run_storage(on: date, dry_run: bool, fetch: bool = True) -> int:
         print(f"保存先から読み込めませんでした。{message}", file=sys.stderr)
         return 1
 
-    record = build(dataio.parse_holdings_csv(holdings_text), on, fetch)
+    cash_text, _ = sg.load(dataclasses.replace(cfg, path=CASH_PATH))
+    record = build(dataio.parse_holdings_csv(holdings_text), on, fetch, ca.parse_csv(cash_text))
     print(_describe(record))
     if dry_run:
         print("--dry-run のため書き込みません。")
@@ -175,6 +189,7 @@ def main() -> int:
     )
     parser.add_argument("--file", default=HOLDINGS_CSV, help="--local 時の holdings.csv パス")
     parser.add_argument("--out", default=SNAPSHOTS_CSV, help="--local 時の snapshots.csv パス")
+    parser.add_argument("--cash", default=CASH_CSV, help="--local 時の cash.csv パス")
     parser.add_argument("--dry-run", action="store_true", help="記録内容を表示するだけ")
     parser.add_argument(
         "--no-fetch", action="store_true",
@@ -185,7 +200,7 @@ def main() -> int:
     today = date.today()
     fetch = not args.no_fetch
     if args.local:
-        return run_local(args.file, args.out, today, args.dry_run, fetch)
+        return run_local(args.file, args.out, today, args.dry_run, fetch, args.cash)
     return run_storage(today, args.dry_run, fetch)
 
 

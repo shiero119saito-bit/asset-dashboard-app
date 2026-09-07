@@ -258,6 +258,23 @@ SMALL_SLICE_THRESHOLD = 2.5
 OTHER_SLICE_LABEL = "その他"
 
 
+def share_by_ticker(holdings: list[Holding]) -> dict[str, float]:
+    """銘柄別の構成比（%）。口座で分かれた保有は合算する。評価額0なら空。"""
+    market = total_market(holdings)
+    if market == 0:
+        return {}
+    sums: dict[str, float] = {}
+    for h in holdings:
+        sums[h.ticker] = sums.get(h.ticker, 0.0) + h.market_value
+    return {t: v / market * 100.0 for t, v in sums.items()}
+
+
+def top_n_share(holdings: list[Holding], n: int) -> float:
+    """上位n銘柄の合計構成比（%）。分散しているつもりで上位が効いていないかを見る。"""
+    shares = sorted(share_by_ticker(holdings).values(), reverse=True)
+    return sum(shares[:n])
+
+
 def rebalance_amounts(
     holdings: list[Holding],
     target: dict[str, float] | None = None,
