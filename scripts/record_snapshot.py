@@ -31,6 +31,7 @@ import dataio  # noqa: E402
 import fundprices as fp  # noqa: E402
 import portfolio as pf  # noqa: E402
 import prices as pr  # noqa: E402
+import pricing_update as pu  # noqa: E402
 import snapshots as sn  # noqa: E402
 import storage as sg  # noqa: E402
 from refresh_prices import resolve_config  # noqa: E402  設定探索は1か所に持つ
@@ -45,26 +46,19 @@ CASH_PATH = "cash.csv"
 
 
 def dividend_map_from_csv(rows: list[dict]) -> dict[str, float]:
-    """CSVの div_per_share から配当マップを作る（空欄はキーを作らない）。"""
-    out: dict[str, float] = {}
-    for row in rows:
-        ticker = str(row.get("ticker", "")).strip()
-        raw = str(row.get("div_per_share", "")).strip()
-        if not ticker or raw in ("", "nan"):
-            continue
-        try:
-            out[ticker] = float(raw)
-        except ValueError:
-            continue
-    return out
+    """CSVから配当マップを作る。**手入力（div_per_share）が自動取得（div_annual）に勝つ**。
+
+    優先順位は画面と同じ `pricing_update.dividend_map` に持たせる（2か所に散らさない）。
+    """
+    return pu.dividend_map(rows)
 
 
 def fetch_missing_dividends(rows: list[dict], div_map: dict[str, float]) -> dict[str, float]:
-    """div_per_share が空の銘柄だけ yfinance から補う（**円建てに換算して返す**）。
+    """配当が保存されていない銘柄だけ yfinance から補う（**円建てに換算して返す**）。
 
-    実データの div_per_share はほぼ空で、アプリも画面表示のたびにライブ取得している。
-    ここで取らないと配当列が毎月0で埋まり、推移として使えない。
-    米国銘柄はドル建てで返るため、app.py と同じ `convert_us_values_to_jpy` を通す
+    週1の `refresh_prices.py --dividends` が div_annual を書くので通常は空振りするが、
+    取り込んだばかりの銘柄がここで0のまま記録されると推移が欠けるため残す。
+    米国銘柄はドル建てで返るため `convert_us_values_to_jpy` を通す
     （為替が取れなければ米国銘柄はキーごと落ちる＝ドル建ての値が混ざらない）。
     """
     missing = [

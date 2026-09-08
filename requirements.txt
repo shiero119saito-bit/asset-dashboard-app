@@ -1,4 +1,4 @@
-streamlit>=1.30
+streamlit>=1.37   # st.fragment（再実行範囲の限定）に必要
 yfinance>=0.2.40
 pandas>=2.0
 plotly>=5.18

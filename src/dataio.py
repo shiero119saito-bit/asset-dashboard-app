@@ -34,6 +34,12 @@ HOLDINGS_COLUMNS = (
     # 購入時点の年1株配当。購入時利回り（＝新規投資の効率）を出すために要る。
     # 現在の配当（div_per_share）は増配で動くため、簿価利回りとは別指標になる
     "div_at_purchase",
+    # 自動取得の配当データ（refresh_prices.py --dividends が書く）。
+    # div_per_share は手入力の上書き値として残し、画面は div_per_share → div_annual の順に使う
+    # ＝定期取得が手で直した値を潰さない。div_annual は必ず円建て（米国株は取得時に換算）
+    "div_annual",
+    "div_months",   # 権利確定月。`3;9` 形式（複数月は ; 区切り）
+    "div_asof",     # div_annual / div_months を取得した日付
     "purpose",
     "source",
     # 口座区分。税率が変わる（NISA は国内課税が非課税）ため、同一銘柄でも口座別に行を分ける

@@ -1,15 +1,20 @@
-"""時価だけを更新するCLI（CSVファイルを介さず保存先へ直接反映する）。
+"""時価・配当を更新するCLI（CSVファイルを介さず保存先へ直接反映する）。
 
 使い方:
-    python scripts/refresh_prices.py            # private repo の holdings.csv を直接更新
-    python scripts/refresh_prices.py --local    # data/holdings.csv を更新（GitHub Actions・オフライン用）
-    python scripts/refresh_prices.py --dry-run  # 取得するだけで書き込まない
+    python scripts/refresh_prices.py              # private repo の holdings.csv の時価を更新
+    python scripts/refresh_prices.py --dividends  # 配当（div_annual）と権利確定月（div_months）を更新
+    python scripts/refresh_prices.py --local      # data/holdings.csv を更新（GitHub Actions・オフライン用）
+    python scripts/refresh_prices.py --dry-run    # 取得するだけで書き込まない
 
 なぜこれが要るか：
 Streamlit Cloud からは Yahoo Finance が HTTP 401 を返すため、アプリ自身は時価を取得できない。
 そこで「取得できる場所」（自宅PC・GitHub Actions）で取得して保存先へ書き込み、
 アプリはその値を読むだけにする。従来は間にCSVの手渡し（DL→アップロード）が挟まっていたが、
 storage.py で保存先へ直接書けるため不要になった。
+
+時価と配当を別モードにしているのは更新頻度が違うため。時価は平日2回（引け後）だが、
+配当と権利確定月は日次で動く値ではないので週1で足りる。同じジョブで毎回引くと
+1銘柄あたりのリクエストが3倍になり、平日の時価更新まで重くなる。
 
 設定（--local 以外で必要）は次の順に探す：
     1. 環境変数 ASSET_STORAGE_TOKEN / _OWNER / _REPO / _PATH / _BRANCH
@@ -151,7 +156,76 @@ def fundprices_for(funds: dict[str, tuple[str, str]]) -> dict[str, float]:
     return fp.fetch_navs(funds) if funds else {}
 
 
-def run_local(path: str, dry_run: bool) -> int:
+def fund_dividends_for(funds: dict[str, tuple[str, str]]) -> dict[str, float]:
+    """投資信託の年間分配金を引く（同上）。
+
+    投資信託は yfinance に存在せず分配金が丸ごと欠落する（楽天・SCHD で実害）。
+    基準価額と同じ協会CSVから直近1年の分配金を取る。
+    """
+    return fp.fetch_annual_dividends(funds) if funds else {}
+
+
+def fetch_dividend_map(rows: list[dict]) -> dict[str, float]:
+    """上場銘柄＋投資信託の年間配当（1株/1口あたり）を **円建てで** 返す。
+
+    時価と同じく、米国銘柄は `pr.convert_us_values_to_jpy` を通してから返すのが責務。
+    ドル建てのまま div_annual に書くと配当が約1/150になり、利回り・55歳設計の逆算まで
+    まとめて狂う（時価で同じ事故を踏んでいる。2026-09-05）。為替が取れないときは
+    米国銘柄をキーごと落とす＝ドル建ての値が列に入ることが構造的に起きないようにする。
+    """
+    tickers = [str(r.get("ticker", "")).strip() for r in rows]
+    fetchable = [t for t in tickers if t and pr.is_fetchable(t)]
+    div_map = pr.fetch_dividends(fetchable)
+
+    us_tickers = {
+        str(r.get("ticker", "")).strip() for r in rows if _text(r, "market") == "us"
+    }
+    if us_tickers & div_map.keys():
+        fx_rate = pr.fetch_fx_rate()
+        if fx_rate is None:
+            print("為替レートを取得できないため、米国銘柄の配当は更新しません。", file=sys.stderr)
+        div_map = pr.convert_us_values_to_jpy(div_map, us_tickers, fx_rate)
+
+    return {**div_map, **fund_dividends_for(fund_codes(rows))}
+
+
+def fetch_months_map(rows: list[dict]) -> dict[str, list[int]]:
+    """権利確定月を引く。投資信託は yfinance に無いため対象外（月不明として集計される）。"""
+    tickers = [str(r.get("ticker", "")).strip() for r in rows]
+    return pr.fetch_dividend_months([t for t in tickers if t and pr.is_fetchable(t)])
+
+
+def compute_dividend_updates(rows: list[dict]) -> tuple[list[dict], int, bool]:
+    """配当と権利確定月を取得して行に反映する。(更新後の行, 更新件数, 取得できたか)。
+
+    div_per_share（手入力）には触れず div_annual / div_months / div_asof だけを書く。
+    """
+    div_map = fetch_dividend_map(rows)
+    months_map = fetch_months_map(rows)
+
+    updated_rows, updated = pu.apply_dividends(rows, div_map, months_map, date.today())
+    missing = sum(1 for r in rows if str(r.get("ticker", "")).strip() not in div_map)
+    print(
+        f"配当を更新：{updated}件 / 全{len(rows)}件"
+        f"（配当={len(div_map)}件・権利確定月={len(months_map)}件・取得できず={missing}件）"
+    )
+
+    fetched = bool(div_map)
+    if not fetched:
+        print(
+            "1銘柄も配当を取得できませんでした。"
+            "Yahoo Finance に拒否されている（IP制限）か、yfinance の仕様変更が疑われます。",
+            file=sys.stderr,
+        )
+    return updated_rows, updated, fetched
+
+
+def updater_for(dividends: bool):
+    """モードに応じた compute 関数を返す（run_local / run_storage で分岐を持たない）。"""
+    return compute_dividend_updates if dividends else compute_updates
+
+
+def run_local(path: str, dry_run: bool, dividends: bool = False) -> int:
     """ローカルCSVを読み書きする（GitHub Actions はこちらを使い、git 側でコミットする）。"""
     if not os.path.exists(path):
         print(f"holdings.csv が見つかりません：{path}", file=sys.stderr)
@@ -164,7 +238,7 @@ def run_local(path: str, dry_run: bool) -> int:
         print(f"holdings.csv が空です：{path}", file=sys.stderr)
         return 1
 
-    rows, updated, fetched = compute_updates(rows)
+    rows, updated, fetched = updater_for(dividends)(rows)
     after = dataio.serialize_holdings_csv(rows)
 
     if dry_run:
@@ -180,7 +254,7 @@ def run_local(path: str, dry_run: bool) -> int:
     return 0
 
 
-def run_storage(dry_run: bool) -> int:
+def run_storage(dry_run: bool, dividends: bool = False) -> int:
     """private repo の holdings.csv を直接更新する（CSVファイルを作らない）。"""
     cfg = resolve_config()
     if cfg is None:
@@ -199,7 +273,7 @@ def run_storage(dry_run: bool) -> int:
         return 1
 
     rows = dataio.parse_holdings_csv(text)
-    rows, updated, fetched = compute_updates(rows)
+    rows, updated, fetched = updater_for(dividends)(rows)
     after = dataio.serialize_holdings_csv(rows)
 
     if dry_run:
@@ -209,7 +283,8 @@ def run_storage(dry_run: bool) -> int:
         print("変更がないためコミットしません。")
         return 0 if fetched else 1
 
-    ok, message = sg.save(cfg, after, sha, f"refresh prices ({date.today().isoformat()})")
+    what = "dividends" if dividends else "prices"
+    ok, message = sg.save(cfg, after, sha, f"refresh {what} ({date.today().isoformat()})")
     print(message)
     if not ok:
         return 1
@@ -218,18 +293,24 @@ def run_storage(dry_run: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="保有銘柄の時価（price列）だけを更新する")
+    parser = argparse.ArgumentParser(
+        description="保有銘柄の時価（price列）または配当（div_annual / div_months）を更新する"
+    )
     parser.add_argument(
         "--local", action="store_true",
         help="保存先ではなく data/holdings.csv を更新する（GitHub Actions・オフライン用）",
     )
     parser.add_argument("--file", default=HOLDINGS_CSV, help="--local 時の対象CSVパス")
     parser.add_argument("--dry-run", action="store_true", help="取得のみ行い書き込まない")
+    parser.add_argument(
+        "--dividends", action="store_true",
+        help="時価ではなく配当と権利確定月を更新する（手入力の div_per_share には触れない）",
+    )
     args = parser.parse_args()
 
     if args.local:
-        return run_local(args.file, args.dry_run)
-    return run_storage(args.dry_run)
+        return run_local(args.file, args.dry_run, args.dividends)
+    return run_storage(args.dry_run, args.dividends)
 
 
 if __name__ == "__main__":

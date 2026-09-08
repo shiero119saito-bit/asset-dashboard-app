@@ -124,3 +124,58 @@ def test_missing_count_handles_same_ticker_in_multiple_brokers(monkeypatch):
     monkeypatch.setattr("builtins.print", lambda *a, **kw: printed.append(" ".join(map(str, a))))
     rp.compute_updates(rows)
     assert "取得できず=0件" in printed[0]
+
+
+# --- 配当モード（--dividends）---
+#
+# 時価と同じ欠陥（ドル建てのまま保存）を配当でも踏まないことを固定する。
+# 配当が1/150になると利回りも55歳設計の逆算も同時に狂う。
+
+
+def _stub_dividends(monkeypatch, dividends, fx, months=None, funds=None):
+    monkeypatch.setattr(rp.pr, "fetch_dividends", lambda tickers: dict(dividends))
+    monkeypatch.setattr(rp.pr, "fetch_fx_rate", lambda: fx)
+    monkeypatch.setattr(rp.pr, "fetch_dividend_months", lambda tickers: dict(months or {}))
+    monkeypatch.setattr(rp, "fund_dividends_for", lambda f: dict(funds or {}))
+
+
+def test_us_dividend_is_converted_to_yen(monkeypatch):
+    _stub_dividends(monkeypatch, {"1343": 60.0, "VYM": 3.5}, fx=150.0)
+    div_map = rp.fetch_dividend_map(ROWS)
+    assert div_map["VYM"] == 3.5 * 150.0
+    assert div_map["1343"] == 60.0  # 日本株は素通し
+
+
+def test_us_dividend_is_dropped_when_fx_unavailable(monkeypatch):
+    """為替が取れないときは米国銘柄を書かない＝ドル建ての値が div_annual に残らない。"""
+    _stub_dividends(monkeypatch, {"1343": 60.0, "VYM": 3.5}, fx=None)
+    div_map = rp.fetch_dividend_map(ROWS)
+    assert "VYM" not in div_map and div_map["1343"] == 60.0
+
+
+def test_fund_dividends_are_merged(monkeypatch):
+    """投信は yfinance に存在しないため、協会CSVから引いた分配金を合流させる。"""
+    _stub_dividends(monkeypatch, {}, fx=None, funds={"オルカン": 12.3})
+    assert rp.fetch_dividend_map(ROWS)["オルカン"] == 12.3
+
+
+def test_dividend_update_writes_only_dividend_columns(monkeypatch):
+    """配当モードは price 列に触れない（時価更新と役割が混ざらない）。"""
+    _stub_dividends(monkeypatch, {"1343": 60.0}, fx=None, months={"1343": [3, 9]})
+    rows, updated, fetched = rp.compute_dividend_updates([dict(ROWS[0])])
+    assert fetched and updated == 1
+    assert rows[0]["div_annual"] == "60" and rows[0]["div_months"] == "3;9"
+    assert rows[0]["div_asof"] == date.today().isoformat()
+    assert rows[0]["price"] == "1800"  # 時価は据え置き
+
+
+def test_dividend_update_reports_not_fetched_when_all_fail(monkeypatch):
+    _stub_dividends(monkeypatch, {}, fx=None)
+    _, updated, fetched = rp.compute_dividend_updates(ROWS)
+    assert updated == 0 and fetched is False
+
+
+def test_updater_for_selects_the_mode():
+    # run_local / run_storage が分岐を持たないための1行。取り違えると時価と配当が入れ替わる
+    assert rp.updater_for(True) is rp.compute_dividend_updates
+    assert rp.updater_for(False) is rp.compute_updates
