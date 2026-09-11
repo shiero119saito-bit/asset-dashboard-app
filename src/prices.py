@@ -253,6 +253,33 @@ def fetch_dividend_months(tickers: list[str]) -> dict[str, list[int]]:
     return result
 
 
+def fetch_market_caps(tickers: list[str]) -> dict[str, float]:
+    """ticker リストの時価総額を {ticker: 時価総額} で返す（**上場先の通貨建て**）。
+
+    企業規模の分散を見るための値。ETF・投資信託は yfinance が marketCap を返さない
+    （quoteType: ETF）ため、キーを省略する＝呼び出し側で「対象外」として扱える。
+
+    円換算はここでは行わない（prices.py は取得だけを担う方針）。呼び出し側が
+    `convert_us_values_to_jpy` を通すこと。ドル建てのまま保存すると規模の区分が2桁ずれる。
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {}
+
+    result: dict[str, float] = {}
+    for ticker in tickers:
+        if not is_fetchable(ticker):
+            continue  # 投資信託等：yfinance に存在せず必ず失敗する
+        try:
+            cap = yf.Ticker(to_yf_symbol(ticker)).info.get("marketCap")
+            if cap:
+                result[ticker] = float(cap)
+        except Exception:
+            continue
+    return result
+
+
 def fetch_price_history(tickers: list[str], years: int) -> dict[str, list[tuple[date, float]]]:
     """月次終値の履歴を {ticker: [(date, price)]} で返す（日付昇順）。
 

@@ -68,7 +68,8 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
         [{col: dataio._cell(row.get(col)) for col in dataio.HOLDINGS_COLUMNS} for row in rows]
     )
     # 数値列は数値として編集させる（文字列のままだと計算に使えない値が入りうる）
-    for col in ("shares", "cost_per_share", "div_per_share", "div_at_purchase", "price"):
+    for col in ("shares", "cost_per_share", "div_per_share", "div_at_purchase", "price",
+                "market_cap"):
         editable[col] = pd.to_numeric(editable[col], errors="coerce")
 
     edited = st.data_editor(
@@ -93,6 +94,15 @@ def _render_holdings_editor(rows: list[dict], sha: str | None, cfg) -> None:
                 help="東証33業種。ETF・投信/REITは末尾の区分を選ぶ。空欄は未分類として集計",
             ),
             "market": st.column_config.SelectboxColumn("上場市場", options=["jp", "us"]),
+            "region": st.column_config.SelectboxColumn(
+                "投資対象地域", options=[""] + list(pf.REGIONS),
+                help="投信・ETFの中身で選ぶ（オルカン＝全世界／S&P500＝米国）。"
+                     "個別株は空欄でよい＝上場市場から自動で決まる",
+            ),
+            "market_cap": st.column_config.NumberColumn(
+                "時価総額", min_value=0.0, format="%,d",
+                help="週1の自動更新が書く（円建て）。ETF・投信は取得できないため空欄",
+            ),
             "div_per_share": st.column_config.NumberColumn("1株配当", min_value=0.0, format="%,.2f"),
             "div_at_purchase": st.column_config.NumberColumn(
                 "購入時1株配当", min_value=0.0, format="%,.2f",

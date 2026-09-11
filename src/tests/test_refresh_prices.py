@@ -132,10 +132,16 @@ def test_missing_count_handles_same_ticker_in_multiple_brokers(monkeypatch):
 # 配当が1/150になると利回りも55歳設計の逆算も同時に狂う。
 
 
-def _stub_dividends(monkeypatch, dividends, fx, months=None, funds=None):
+def _stub_dividends(monkeypatch, dividends, fx, months=None, funds=None, caps=None):
+    """週1ジョブが引くもの（配当・権利月・投信分配金・時価総額）をすべて塞ぐ。
+
+    **1つでも塞ぎ忘れるとテストが実際に yfinance を叩く**（時価総額の追加時に踏んだ）。
+    引数を増やしたらここに足すこと。
+    """
     monkeypatch.setattr(rp.pr, "fetch_dividends", lambda tickers: dict(dividends))
     monkeypatch.setattr(rp.pr, "fetch_fx_rate", lambda: fx)
     monkeypatch.setattr(rp.pr, "fetch_dividend_months", lambda tickers: dict(months or {}))
+    monkeypatch.setattr(rp.pr, "fetch_market_caps", lambda tickers: dict(caps or {}))
     monkeypatch.setattr(rp, "fund_dividends_for", lambda f: dict(funds or {}))
 
 
@@ -179,3 +185,36 @@ def test_updater_for_selects_the_mode():
     # run_local / run_storage が分岐を持たないための1行。取り違えると時価と配当が入れ替わる
     assert rp.updater_for(True) is rp.compute_dividend_updates
     assert rp.updater_for(False) is rp.compute_updates
+
+
+# --- 時価総額（企業規模の集計軸）---
+
+
+def test_us_market_cap_is_converted_to_yen(monkeypatch):
+    """ドル建てのまま書くと規模の区分が2桁ずれる。時価・配当と同じ規約で円建てにする。"""
+    _stub_dividends(monkeypatch, {}, fx=150.0, caps={"1343": 5e11, "VYM": 6e10})
+    caps = rp.fetch_market_caps(ROWS)
+    assert caps["VYM"] == 6e10 * 150.0
+    assert caps["1343"] == 5e11  # 日本株は素通し
+
+
+def test_us_market_cap_is_dropped_when_fx_unavailable(monkeypatch):
+    _stub_dividends(monkeypatch, {}, fx=None, caps={"1343": 5e11, "VYM": 6e10})
+    caps = rp.fetch_market_caps(ROWS)
+    assert "VYM" not in caps and caps["1343"] == 5e11
+
+
+def test_market_cap_is_written_by_the_weekly_job(monkeypatch):
+    """配当と同じ週1ジョブが market_cap も書くこと（別ジョブを増やさない）。"""
+    _stub_dividends(monkeypatch, {"1343": 60.0}, fx=None, caps={"1343": 5.4e11})
+    rows, updated, _ = rp.compute_dividend_updates([dict(ROWS[0])])
+    assert rows[0]["market_cap"] == "540000000000"
+    # 返す件数は「書き込むか」の判定用の合計（配当1＋時価総額1）。0でなければ書く
+    assert updated == 2
+
+
+def test_funds_get_no_market_cap(monkeypatch):
+    """ETF・投信は yfinance が marketCap を返さない＝列は空のまま（対象外として集計される）。"""
+    _stub_dividends(monkeypatch, {}, fx=None, caps={})
+    rows, _, _ = rp.compute_dividend_updates([dict(ROWS[2])])
+    assert str(rows[0].get("market_cap", "")).strip() == ""

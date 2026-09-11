@@ -369,18 +369,31 @@ def test_no_save_button_without_storage(monkeypatch):
 
 
 def test_main_runs_with_every_allocation_axis(monkeypatch):
-    """集計軸をどれに切り替えても main() が通ること（口座区分の軸を含む）。
+    """集計軸をどれに切り替えても main() が通ること。
 
     既定のスタブは options[0]（＝資産クラス）しか返さないため、後から足した軸は
-    一度も実行されないまま緑になる。軸ごとに描画の分岐が違うので通しておく。
+    一度も実行されないまま緑になる。軸ごとに描画の分岐が違うので全部通す。
+
+    **範囲は軸の一覧から取る**。以前は (0,1,2,3) とハードコードしていて、
+    5軸目以降（口座区分・投資対象地域・企業規模）が実行されないまま緑になっていた。
     """
-    for index in (0, 1, 2, 3):
+    _reset_modules()
+    _install_streamlit_stub(monkeypatch, checkbox_value=False)
+    from ui.tab_portfolio import ALLOCATION_AXES
+
+    chosen = []
+    for index in range(len(ALLOCATION_AXES)):
         st = _install_streamlit_stub(monkeypatch, checkbox_value=False, secrets=STORAGE_SECRETS)
         base_radio = st.radio
-        st.radio = (
-            lambda label, options, _i=index, **kw:
-            options[min(_i, len(options) - 1)] if label == "集計軸" else base_radio(label, options, **kw)
-        )
+
+        def _radio(label, options, _i=index, **kw):
+            if label != "集計軸":
+                return base_radio(label, options, **kw)
+            axis = options[_i]           # 範囲外なら IndexError で落とす（黙って先頭に戻さない）
+            chosen.append(axis)
+            return axis
+
+        st.radio = _radio
         _reset_modules()
         import prices as pr
         import storage as sg
@@ -393,6 +406,9 @@ def test_main_runs_with_every_allocation_axis(monkeypatch):
         from ui import datasource as ui_datasource
         monkeypatch.setattr(ui_datasource, "save_birth_date", lambda birth, cfg=None: (True, "保存した"))
         app.main()
+
+    # 回数ではなく「どの軸を踏んだか」で担保する
+    assert chosen == list(ALLOCATION_AXES)
 
 
 def test_uploaded_csv_keeps_storage_sha_for_replace_save(monkeypatch):

@@ -11,6 +11,12 @@ import portfolio as pf
 from ui.constants import ACCOUNT_LABELS, MARKET_LABELS, PURPOSE_LABELS, SOURCE_LABELS
 from ui.widgets import pie, show_table, simple_allocation
 
+# 集計軸の一覧。**定数として外に出しているのはテストが全軸を通すため**
+# （ハードコードの範囲でループしていたせいで、後から足した軸が一度も実行されずに緑になっていた）
+ALLOCATION_AXES = (
+    "資産クラス", "業種", "投資対象地域", "企業規模", "商品種別", "上場市場", "口座区分",
+)
+
 
 def render(holdings, div_map, cash_rows, cfg) -> None:
     """リスクの偏りを見る場所。集中度と切り口別の構成比。"""
@@ -73,10 +79,7 @@ def _render_allocation_axes(holdings, cfg) -> None:
     軸名はデータの実態に合わせている。sector 列は業種でなく商品種別、
     market 列は上場市場（投資対象地域ではない）。
     """
-    axis = st.radio(
-        "集計軸", ["資産クラス", "業種", "商品種別", "上場市場", "口座区分"],
-        horizontal=True, key="alloc_axis",
-    )
+    axis = st.radio("集計軸", list(ALLOCATION_AXES), horizontal=True, key="alloc_axis")
     left, right = st.columns([1, 1])
 
     if axis == "資産クラス":
@@ -107,6 +110,23 @@ def _render_allocation_axes(holdings, cfg) -> None:
             "東証33業種（holdings.csv の industry 列）。"
             + (f"日本個別株 {len(pf.group_by_ticker(target))} 銘柄が対象。"
                if jp_only else "ETF・投信は中身を業種に分解せず1区分として扱う。")
+        )
+    elif axis == "投資対象地域":
+        simple_allocation(axis, pf.allocation_by_region(holdings), {}, left, right, cfg)
+        unset = pf.allocation_by_region(holdings).get(pf.REGION_UNSET, 0.0)
+        st.caption(
+            "**投信・ETFは中身で分類する**（東証上場のオルカン＝全世界、S&P500＝米国）。"
+            "個別株は上場市場から自動で決まる。下の「上場市場」軸とは別物で、"
+            "そちらは東証上場ならすべて日本株に数える。"
+            + (f"　未設定が {unset:.1f}% ある（データタブの用途の隣で選べる）。" if unset else "")
+        )
+    elif axis == "企業規模":
+        simple_allocation(axis, pf.allocation_by_size(holdings), {}, left, right, cfg)
+        st.caption(
+            f"時価総額の区分（大型＝{pf.SIZE_TIERS[0][1] / 1e12:.0f}兆円以上／"
+            f"中型＝{pf.SIZE_TIERS[1][1] / 1e8:.0f}億円以上／小型＝それ未満）。"
+            "**公式の指数区分ではなく表示上の目安**。ETF・投信は時価総額を取得できないため"
+            "「対象外」にまとめている（中身の規模までは分解しない）。"
         )
     elif axis == "商品種別":
         simple_allocation(axis, pf.allocation_by_sector(holdings), {}, left, right, cfg)

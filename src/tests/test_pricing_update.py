@@ -220,3 +220,46 @@ def test_dividend_map_skips_empty_and_broken_values():
 def test_dividend_months_map_skips_blank_rows():
     rows = [{"ticker": "A", "div_months": "3;9"}, {"ticker": "B", "div_months": ""}]
     assert pu.dividend_months_map(rows) == {"A": [3, 9]}
+
+
+# --- 時価総額（企業規模の集計軸・週1ジョブが書く）---
+
+
+def test_apply_market_caps_writes_rounded_integers():
+    """桁が大きいので整数で書く。小数を残すと毎週そこだけ動いて無意味な差分になる。"""
+    rows, updated = pu.apply_market_caps(
+        [{"ticker": "9432", "market_cap": ""}], {"9432": 13953010761728.4}, TODAY
+    )
+    assert updated == 1 and rows[0]["market_cap"] == "13953010761728"
+
+
+def test_apply_market_caps_keeps_existing_when_not_fetched():
+    """ETF・投信は取得できない＝既存値をそのまま残す（空欄なら空欄のまま）。"""
+    rows, updated = pu.apply_market_caps(
+        [{"ticker": "オルカン", "market_cap": ""}, {"ticker": "1605", "market_cap": "4546604564480"}],
+        {}, TODAY,
+    )
+    assert updated == 0
+    assert rows[0]["market_cap"] == "" and rows[1]["market_cap"] == "4546604564480"
+
+
+def test_apply_market_caps_same_value_is_not_an_update():
+    rows, updated = pu.apply_market_caps(
+        [{"ticker": "1605", "market_cap": "4546604564480"}], {"1605": 4546604564480.0}, TODAY
+    )
+    assert updated == 0 and rows[0]["market_cap"] == "4546604564480"
+
+
+def test_apply_market_caps_does_not_mutate_input():
+    original = [{"ticker": "9432", "market_cap": ""}]
+    pu.apply_market_caps(original, {"9432": 1.0e12}, TODAY)
+    assert original[0]["market_cap"] == ""
+
+
+def test_apply_market_caps_leaves_dividend_columns_alone():
+    """役割を混ぜない：時価総額の更新が配当列に触れないこと。"""
+    rows, _ = pu.apply_market_caps(
+        [{"ticker": "1605", "div_annual": "70", "div_asof": "2026-09-05"}],
+        {"1605": 4.5e12}, TODAY,
+    )
+    assert rows[0]["div_annual"] == "70" and rows[0]["div_asof"] == "2026-09-05"

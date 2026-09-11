@@ -60,6 +60,10 @@ class Holding:
     # 業種（東証33業種）。sector＝商品種別とは別軸。空欄は未分類として集計する
     industry: str = ""
     market: str = "us"
+    # 投資対象地域。market（上場市場）とは別軸。空欄は個別株のみ market から導出する
+    region: str = ""
+    # 時価総額（円建て）。企業規模の集計に使う。0＝未取得（ETF・投信は取得できない）
+    market_cap: float = 0.0
     # 購入時点の年1株配当。購入時利回り（新規投資の効率）の分子。
     # 未入力（0）の銘柄は購入時利回りの母数から外す＝増配後の値と混ぜない
     div_at_purchase: float = 0.0
@@ -122,6 +126,8 @@ def build_holdings(rows: list[dict], price_map: dict[str, float]) -> list[Holdin
                 sector=_clean_str(row.get("sector"), "その他"),
                 industry=_clean_str(row.get("industry"), ""),
                 market=_resolve_market(row.get("market"), ticker),
+                region=_clean_str(row.get("region"), ""),
+                market_cap=_to_float(row.get("market_cap"), 0.0),
                 div_at_purchase=_to_float(row.get("div_at_purchase"), 0.0),
                 purpose=_clean_str(row.get("purpose"), ""),
                 source=_clean_str(row.get("source"), ""),
@@ -255,8 +261,71 @@ def allocation_by_market_region(holdings: list[Holding]) -> dict[str, float]:
 
     注意：market は上場市場（jp/us）であり投資対象地域ではない。
     東証上場のオルカン・S&P500 ETF/投信は jp に計上される。
+    投資対象で見たいときは `allocation_by_region`（region 列）を使うこと。
     """
     return _allocation_by_key(holdings, lambda h: h.market)
+
+
+# 投資対象地域の選択肢。上場市場（jp/us）とは別軸で、投信・ETF は中身で分類する。
+# 1銘柄＝1地域のラベルにしている（中身の按分はしない）：按分には目論見書由来の比率表を
+# 手で維持し続ける必要があり、月次で古びるため（design-decisions 2026-09-10）
+REGIONS = ("日本", "米国", "先進国", "全世界", "新興国", "その他")
+
+# region 列が空で、market からも導出できない保有をまとめる表示名
+REGION_UNSET = "未設定"
+
+# 上場市場 → 投資対象地域。**個別株にだけ**当てる導出（下記 resolve_region 参照）
+_REGION_BY_MARKET = {"jp": "日本", "us": "米国"}
+
+
+def resolve_region(holding: Holding) -> str:
+    """保有の投資対象地域を決める。明示 → 個別株なら上場市場から導出 → 未設定。
+
+    **導出を個別株に限る**のが肝。ETF・投信は上場市場と投資対象が一致せず、
+    東証上場のオルカンを「日本」に計上してしまう（それが直したかった誤りそのもの）。
+    個別株かどうかは asset_class で見る（jp_dividend＝日本個別株の枠）。
+    """
+    if holding.region:
+        return holding.region
+    if holding.asset_class == "jp_dividend":
+        return _REGION_BY_MARKET.get(holding.market, REGION_UNSET)
+    return REGION_UNSET
+
+
+def allocation_by_region(holdings: list[Holding]) -> dict[str, float]:
+    """投資対象地域別の評価額構成比（%）。全保有を渡せば合計100%になる。
+
+    未設定（ETF・投信で region を入れていない分）も1区分として出す＝
+    「入れ忘れが構成比に紛れて見えなくなる」ことがない。
+    """
+    return _allocation_by_key(holdings, resolve_region)
+
+
+# 企業規模の区分（時価総額の下限・円）。**公式の指数区分ではなく表示上の目安**。
+# 東証の TOPIX Core30/Large70 等とは一致しない。大まかな偏りを見るためのもの
+SIZE_TIERS = (("大型", 1_000_000_000_000.0), ("中型", 100_000_000_000.0), ("小型", 0.0))
+
+# 時価総額が取れない保有（ETF・投信）の区分。yfinance は quoteType: ETF に marketCap を返さない
+SIZE_NOT_APPLICABLE = "対象外"
+
+
+def size_class(market_cap: float) -> str:
+    """時価総額から企業規模の区分名を返す。0以下（未取得）は「対象外」。"""
+    if market_cap <= 0:
+        return SIZE_NOT_APPLICABLE
+    for label, floor in SIZE_TIERS:
+        if market_cap >= floor:
+            return label
+    return SIZE_NOT_APPLICABLE
+
+
+def allocation_by_size(holdings: list[Holding]) -> dict[str, float]:
+    """企業規模別の評価額構成比（%）。全保有を渡せば合計100%になる。
+
+    ETF・投信は「対象外」に寄せる（中身の規模までは分解しない）。
+    個別株だけの偏りを見たいときは jp_stocks_only で絞ってから渡す。
+    """
+    return _allocation_by_key(holdings, lambda h: size_class(h.market_cap))
 
 
 def allocation_by_account(holdings: list[Holding]) -> dict[str, float]:

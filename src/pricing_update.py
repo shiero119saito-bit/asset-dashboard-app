@@ -25,6 +25,9 @@ DIVIDEND_ASOF_COLUMN = "div_asof"
 
 MONTHS_SEPARATOR = ";"
 
+# 時価総額（円建て）。配当と同じ週1ジョブが書く＝鮮度は div_asof が表す
+MARKET_CAP_COLUMN = "market_cap"
+
 
 def format_price(value: float) -> str:
     """時価をCSVセル用の文字列にする。末尾の不要な0を落として桁を膨らませない。"""
@@ -135,6 +138,33 @@ def apply_dividends(
         new_row[DIVIDEND_ASOF_COLUMN] = asof
         if changed:
             updated += 1
+        result.append(new_row)
+
+    return result, updated
+
+
+def apply_market_caps(
+    rows: list[dict], cap_map: dict[str, float], today: date
+) -> tuple[list[dict], int]:
+    """cap_map にある銘柄の market_cap を更新する。配当と同じ週1ジョブから呼ぶ。
+
+    `apply_dividends` と同じ規約：取得できなかった銘柄（ETF・投信）は既存値を残し、
+    入力の rows は書き換えず複製を返す。as-of 列は持たない（同じジョブが書く div_asof が実態）。
+
+    桁が大きいので整数に丸めて書く。企業規模の区分（兆・千億の境目）には十分な精度で、
+    小数を残すと差分だけが毎週動いて無意味なコミットを生む。
+    """
+    updated = 0
+    result: list[dict] = []
+
+    for row in rows:
+        new_row = dict(row)
+        cap = cap_map.get(str(row.get("ticker", "")).strip())
+        if cap:
+            text = f"{cap:.0f}"
+            if _cell(new_row, MARKET_CAP_COLUMN) != text:
+                updated += 1
+            new_row[MARKET_CAP_COLUMN] = text
         result.append(new_row)
 
     return result, updated

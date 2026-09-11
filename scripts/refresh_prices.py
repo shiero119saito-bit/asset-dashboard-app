@@ -195,19 +195,48 @@ def fetch_months_map(rows: list[dict]) -> dict[str, list[int]]:
     return pr.fetch_dividend_months([t for t in tickers if t and pr.is_fetchable(t)])
 
 
-def compute_dividend_updates(rows: list[dict]) -> tuple[list[dict], int, bool]:
-    """配当と権利確定月を取得して行に反映する。(更新後の行, 更新件数, 取得できたか)。
+def fetch_market_caps(rows: list[dict]) -> dict[str, float]:
+    """時価総額を **円建てで** 返す。ETF・投信は yfinance が返さないのでキーを作らない。
 
-    div_per_share（手入力）には触れず div_annual / div_months / div_asof だけを書く。
+    yfinance の `info["marketCap"]` は上場先の通貨建て（日本株は円・米国株はドル）。
+    ドル建てのまま market_cap 列に書くと企業規模の区分が2桁ずれるため、時価・配当と同じく
+    `pr.convert_us_values_to_jpy` を通す（為替が取れなければ米国銘柄はキーごと落とす）。
+    """
+    caps = pr.fetch_market_caps(
+        [t for t in (str(r.get("ticker", "")).strip() for r in rows)
+         if t and pr.is_fetchable(t)]
+    )
+    us_tickers = {
+        str(r.get("ticker", "")).strip() for r in rows if _text(r, "market") == "us"
+    }
+    if us_tickers & caps.keys():
+        fx_rate = pr.fetch_fx_rate()
+        if fx_rate is None:
+            print("為替レートを取得できないため、米国銘柄の時価総額は更新しません。", file=sys.stderr)
+        caps = pr.convert_us_values_to_jpy(caps, us_tickers, fx_rate)
+    return caps
+
+
+def compute_dividend_updates(rows: list[dict]) -> tuple[list[dict], int, bool]:
+    """配当・権利確定月・時価総額を取得して行に反映する。(更新後の行, 更新件数, 取得できたか)。
+
+    どれも日次では動かない「ゆっくり動くメタデータ」なので、週1のジョブでまとめて引く。
+    div_per_share（手入力）には触れず div_annual / div_months / div_asof / market_cap を書く。
     """
     div_map = fetch_dividend_map(rows)
     months_map = fetch_months_map(rows)
+    cap_map = fetch_market_caps(rows)
 
-    updated_rows, updated = pu.apply_dividends(rows, div_map, months_map, date.today())
+    updated_rows, div_updated = pu.apply_dividends(rows, div_map, months_map, date.today())
+    updated_rows, cap_updated = pu.apply_market_caps(updated_rows, cap_map, date.today())
+    # 書き込むかの判定に使うので合計を返す。内訳は別々に出す
+    # （同じ行の配当と時価総額が両方動くと合計は行数を超えるため、1つの数字にすると誤読する）
+    updated = div_updated + cap_updated
     missing = sum(1 for r in rows if str(r.get("ticker", "")).strip() not in div_map)
     print(
-        f"配当を更新：{updated}件 / 全{len(rows)}件"
-        f"（配当={len(div_map)}件・権利確定月={len(months_map)}件・取得できず={missing}件）"
+        f"更新：配当 {div_updated}件・時価総額 {cap_updated}件 / 全{len(rows)}件"
+        f"（取得＝配当 {len(div_map)}件・権利確定月 {len(months_map)}件"
+        f"・時価総額 {len(cap_map)}件・取得できず {missing}件）"
     )
 
     fetched = bool(div_map)

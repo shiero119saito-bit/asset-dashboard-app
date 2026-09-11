@@ -387,3 +387,100 @@ def test_allocation_by_account_treats_blank_as_specific():
     ]
     alloc = pf.allocation_by_account(holdings)
     assert alloc == {"specific": 50.0, "nisa_growth": 50.0}
+
+
+# --- 投資対象地域（上場市場とは別軸）---
+#
+# 2026-09-10 追加。「上場市場」軸は market 列（jp/us）で、東証上場のオルカン・S&P500 投信が
+# すべて日本株に計上されていた（実データで 85/87 行が jp＝「日本株98%」という誤った分散）。
+# 投資対象で分類する軸を別に持つ。
+
+def _row(ticker, asset_class, market="jp", region="", cap=0, shares=1, cost=100):
+    return {"ticker": ticker, "name": ticker, "asset_class": asset_class, "market": market,
+            "region": region, "market_cap": cap, "shares": shares, "cost_per_share": cost}
+
+
+def test_region_uses_the_explicit_column_first():
+    """明示された region が最優先。投信はここでしか正しく決まらない。"""
+    h = pf.build_holdings([_row("オルカン", "index", market="jp", region="全世界")], {})[0]
+    assert pf.resolve_region(h) == "全世界"
+
+
+def test_region_of_individual_stocks_comes_from_the_market():
+    """個別株は上場市場＝投資対象。68銘柄に手入力させないための導出。"""
+    jp, us = pf.build_holdings(
+        [_row("1605", "jp_dividend", market="jp"), _row("AAPL", "jp_dividend", market="us")], {}
+    )
+    assert pf.resolve_region(jp) == "日本"
+    assert pf.resolve_region(us) == "米国"
+
+
+def test_region_is_never_derived_for_funds():
+    """**ETF・投信は上場市場から導出しない**。これが直したかった誤りそのもの。
+
+    東証上場のオルカンを「日本」に計上してしまうため、region 未入力なら未設定に倒す。
+    """
+    for asset_class in ("index", "us_dividend", "reit"):
+        h = pf.build_holdings([_row("F", asset_class, market="jp")], {})[0]
+        assert pf.resolve_region(h) == pf.REGION_UNSET, asset_class
+
+
+def test_allocation_by_region_totals_100():
+    holdings = pf.build_holdings([
+        _row("1605", "jp_dividend", market="jp", shares=10, cost=100),        # 日本 1000
+        _row("オルカン", "index", region="全世界", shares=10, cost=100),        # 全世界 1000
+        _row("未設定投信", "index", shares=20, cost=100),                      # 未設定 2000
+    ], {})
+    alloc = pf.allocation_by_region(holdings)
+    assert alloc == {"日本": pytest.approx(25.0), "全世界": pytest.approx(25.0),
+                     pf.REGION_UNSET: pytest.approx(50.0)}
+    assert sum(alloc.values()) == pytest.approx(100.0)
+
+
+def test_allocation_by_region_empty_portfolio_is_safe():
+    assert pf.allocation_by_region([]) == {}
+
+
+def test_market_region_axis_is_unchanged_by_the_new_axis():
+    """既存の「上場市場」軸は税・為替の観点で別物として残す（壊さない）。"""
+    holdings = pf.build_holdings([_row("オルカン", "index", market="jp", region="全世界")], {})
+    assert pf.allocation_by_market_region(holdings) == {"jp": pytest.approx(100.0)}
+
+
+# --- 企業規模 ---
+
+
+def test_size_class_boundaries():
+    """区分の境目はちょうどの値を上の区分に入れる（1兆円＝大型・1000億円＝中型）。"""
+    assert pf.size_class(1_000_000_000_000) == "大型"
+    assert pf.size_class(999_999_999_999) == "中型"
+    assert pf.size_class(100_000_000_000) == "中型"
+    assert pf.size_class(99_999_999_999) == "小型"
+
+
+def test_size_class_without_market_cap_is_not_applicable():
+    """ETF・投信は yfinance が marketCap を返さない＝規模で分類しない。"""
+    assert pf.size_class(0) == pf.SIZE_NOT_APPLICABLE
+    assert pf.size_class(-1) == pf.SIZE_NOT_APPLICABLE
+
+
+def test_allocation_by_size_totals_100_with_funds_included():
+    holdings = pf.build_holdings([
+        _row("9432", "jp_dividend", cap=14_000_000_000_000, shares=10, cost=100),  # 大型 1000
+        _row("2169", "jp_dividend", cap=50_000_000_000, shares=10, cost=100),      # 小型 1000
+        _row("オルカン", "index", shares=20, cost=100),                             # 対象外 2000
+    ], {})
+    alloc = pf.allocation_by_size(holdings)
+    assert alloc == {"大型": pytest.approx(25.0), "小型": pytest.approx(25.0),
+                     pf.SIZE_NOT_APPLICABLE: pytest.approx(50.0)}
+
+
+def test_market_cap_is_read_from_the_row():
+    h = pf.build_holdings([_row("9432", "jp_dividend", cap="13953010761728")], {})[0]
+    assert h.market_cap == 13953010761728.0
+
+
+def test_broken_market_cap_does_not_crash():
+    # 手編集で壊れた値が入っても画面を落とさない（取得できていない扱い）
+    h = pf.build_holdings([_row("9432", "jp_dividend", cap="なし")], {})[0]
+    assert h.market_cap == 0.0 and pf.size_class(h.market_cap) == pf.SIZE_NOT_APPLICABLE
