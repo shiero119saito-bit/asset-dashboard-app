@@ -119,6 +119,34 @@ def test_change_from_previous_zero_base_does_not_explode():
     assert rate == 0.0
 
 
+def test_index_change_from_previous_derives_from_pct_and_market():
+    """index_pct（構成比）× total_market から評価額を逆算して差分を出す。"""
+    rows = [
+        {"date": "2026-08-01", "total_market": "1000", "index_pct": "50"},   # 500
+        {"date": "2026-09-01", "total_market": "1200", "index_pct": "60"},   # 720
+    ]
+    delta, rate = sn.index_change_from_previous(rows)
+    assert delta == pytest.approx(220.0)
+    assert rate == pytest.approx(44.0)
+
+
+def test_index_change_from_previous_needs_two_points():
+    assert sn.index_change_from_previous([]) is None
+    assert sn.index_change_from_previous(
+        [{"date": "2026-09-01", "total_market": "1000", "index_pct": "50"}]
+    ) is None
+
+
+def test_index_change_from_previous_zero_base_does_not_explode():
+    rows = [
+        {"date": "2026-08-01", "total_market": "1000", "index_pct": "0"},    # 0
+        {"date": "2026-09-01", "total_market": "1000", "index_pct": "50"},   # 500
+    ]
+    delta, rate = sn.index_change_from_previous(rows)
+    assert delta == pytest.approx(500.0)
+    assert rate == 0.0
+
+
 def test_latest_returns_newest_row():
     rows = [{"date": "2026-09-01"}, {"date": "2026-07-01"}]
     assert sn.latest(rows)["date"] == "2026-09-01"

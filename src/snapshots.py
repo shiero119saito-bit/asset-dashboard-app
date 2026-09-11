@@ -147,6 +147,27 @@ def deltas(rows: list[dict], column: str) -> list[tuple[str, float]]:
     ]
 
 
+def index_change_from_previous(rows: list[dict]) -> tuple[float, float] | None:
+    """インデックス評価額の直近1件とその1つ前の差（絶対値, 変化率%）。
+
+    インデックスの評価額そのものは列を持たない（`index_pct` の構成比のみ）ため、
+    各行の `total_market × index_pct / 100` で導出してから比較する。
+    比較対象が無ければ None。前の値が0のときは率を0%とする（無限大を出さない）。
+    """
+    ordered = sorted(rows, key=lambda r: str(r.get("date", "")))
+    if len(ordered) < 2:
+        return None
+
+    def index_value(row: dict) -> float:
+        return _to_float(row.get("total_market")) * _to_float(row.get("index_pct")) / 100.0
+
+    current = index_value(ordered[-1])
+    previous = index_value(ordered[-2])
+    delta = current - previous
+    rate = (delta / previous * 100.0) if previous else 0.0
+    return (delta, rate)
+
+
 def latest(rows: list[dict]) -> dict | None:
     """最新の1行。無ければ None。"""
     if not rows:

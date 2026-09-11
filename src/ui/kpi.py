@@ -66,6 +66,7 @@ def plan_numbers(holdings, div_map, cash_rows, income_rows, goals, birth_date) -
         "monthly_income": monthly_income,
         "goal_monthly": goal_monthly,
         "semi_retire": dataio.goal_progress(monthly_income, goal_monthly),
+        "index_progress": dataio.goal_progress(index_now, index_future),
         "total_assets": ca.net_worth(pf.total_market(holdings), cash_rows),
     }
 
@@ -73,63 +74,68 @@ def plan_numbers(holdings, div_map, cash_rows, income_rows, goals, birth_date) -
 def render_kpi_bar(holdings, div_map, cash_rows, snapshot_rows, goals, plan) -> None:
     """全タブ共通のKPI。**55歳のCF設計に効く数字だけ**を置き、細部は各タブへ送る。
 
-    3項目 × 2段を1つの枠に収める。上段＝いまの資産、下段＝55歳の生活設計。
+    3項目 × 2段を1つの枠に収める。上段＝いまの資産＋前回取得比、下段＝目標達成率。
     """
     market = pf.total_market(holdings)
     annual_after = plan["dividend_now"]
     dividend_progress = dataio.goal_progress(annual_after, goals["goal_dividend_annual"])
-    change = sn.change_from_previous(snapshot_rows, "net_worth")
+    net_worth_change = sn.change_from_previous(snapshot_rows, "net_worth")
+    index_change = sn.index_change_from_previous(snapshot_rows)
+    dividend_change = sn.change_from_previous(snapshot_rows, "annual_dividend_after_tax")
+    index_shortfall = max(plan["index_future"] - plan["index_now"], 0.0)
 
     with st.container(border=True):
         a1, a2, a3 = st.columns(3)
         kpi_cell(
             a1, "総資産", yen(plan["total_assets"]),
-            side=delta_text(change) or "", tone=tone(change[0]) if change else "",
+            side=delta_text(net_worth_change) or "",
+            tone=tone(net_worth_change[0]) if net_worth_change else "",
             subs=(
                 f"現金：{yen_short(ca.total(cash_rows))}（{ca.cash_ratio(market, cash_rows):.1f}%）",
                 f"運用：{yen_short(market)}（{ca.invested_ratio(market, cash_rows):.1f}%）",
             ),
         )
         kpi_cell(
-            a2, "年間予想配当（税抜）", yen(annual_after),
-            side=f"月 {yen_short(annual_after / 12)}",
+            a2, "インデックス", yen(plan["index_now"]),
+            side=delta_text(index_change) or "",
+            tone=tone(index_change[0]) if index_change else "",
             subs=(
-                f"税込：{yen_short(dv.total_annual_dividend(holdings, div_map, pre_tax=True))}",
-                f"簿価利回り：{dv.yield_on_cost(holdings, div_map):.2f}%",
+                f"→ {plan['target_age']}歳 {yen_short(plan['index_future'])}"
+                f"（残り {plan['years']}年）",
+                f"積立：月 {yen_short(goals['assumed_index_monthly'])}"
+                f"・想定年率 {goals['assumed_index_return']:.1f}%",
             ), divider=True,
         )
         kpi_cell(
-            a3, "配当目標達成率", f"{dividend_progress:.1f}%",
-            side=f"{yen_short(annual_after)} / {yen_short(goals['goal_dividend_annual'])}",
-            progress=dividend_progress / 100.0,
-            subs=(f"不足：{yen_short(dv.shortfall(goals['goal_dividend_annual'], annual_after))}（年・税抜）",),
-            divider=True,
+            a3, "年間予想配当（税抜）", yen(annual_after),
+            side=delta_text(dividend_change) or "",
+            tone=tone(dividend_change[0]) if dividend_change else "",
+            subs=(
+                f"月 {yen_short(annual_after / 12)}"
+                f"・税込 {yen_short(dv.total_annual_dividend(holdings, div_map, pre_tax=True))}",
+                f"簿価利回り：{dv.yield_on_cost(holdings, div_map):.2f}%",
+            ), divider=True,
         )
 
         st.markdown('<hr class="kpi-hr">', unsafe_allow_html=True)
         b1, b2, b3 = st.columns(3)
         kpi_cell(
-            b1, "インデックス", yen(plan["index_now"]),
-            side=f"→ {plan['target_age']}歳 {yen_short(plan['index_future'])}",
-            subs=(
-                f"積立：月 {yen_short(goals['assumed_index_monthly'])}"
-                f"・想定年率 {goals['assumed_index_return']:.1f}%",
-                f"残り {plan['years']}年（現在 {plan['current_age']}歳）",
-            ),
-        )
-        kpi_cell(
-            b2, f"{plan['target_age']}歳 想定月収", yen(plan["monthly_income"]),
-            side=f"目標 {yen_short(plan['goal_monthly'])}",
-            subs=(
-                f"配当 {yen_short(plan['dividend_future'] / 12)}"
-                f"・取崩 {yen_short(goals['goal_withdrawal_monthly'])}",
-                f"事業 {yen_short(plan['business'])}・労働 {yen_short(plan['labor'])}"
-                + ("" if plan["has_income_actuals"] else "（目標値）"),
-            ), divider=True,
-        )
-        kpi_cell(
-            b3, "セミリタイア達成率", f"{plan['semi_retire']:.1f}%",
+            b1, "セミリタイア達成率", f"{plan['semi_retire']:.1f}%",
             side=f"{yen_short(plan['monthly_income'])} / {yen_short(plan['goal_monthly'])}",
             progress=plan["semi_retire"] / 100.0,
-            subs=("配当は増配0%（保守）で計算",), divider=True,
+            subs=("配当は増配0%（保守）で計算",),
+        )
+        kpi_cell(
+            b2, "インデックス目標達成率", f"{plan['index_progress']:.1f}%",
+            side=f"{yen_short(plan['index_now'])} / {yen_short(plan['index_future'])}",
+            progress=plan["index_progress"] / 100.0,
+            subs=(f"不足：{yen_short(index_shortfall)}（{plan['target_age']}歳時点）",),
+            divider=True,
+        )
+        kpi_cell(
+            b3, "配当目標達成率", f"{dividend_progress:.1f}%",
+            side=f"{yen_short(annual_after)} / {yen_short(goals['goal_dividend_annual'])}",
+            progress=dividend_progress / 100.0,
+            subs=(f"不足：{yen_short(dv.shortfall(goals['goal_dividend_annual'], annual_after))}（年・税抜）",),
+            divider=True,
         )
